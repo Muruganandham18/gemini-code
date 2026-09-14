@@ -18,6 +18,7 @@ import { PlanJournal, findResumablePlan, readPlan, clearPlan, PLAN_FILENAME } fr
 import { createUpdatePlanTool } from "./tools/updatePlan.js";
 import { createScreenshotTool } from "./tools/screenshot.js";
 import { createBrowsePageTool } from "./tools/browsePage.js";
+import { createBrowserTools } from "./tools/browser.js";
 import { checkpoints } from "./context/checkpoint.js";
 import { readClipboardImageDetailed, isImagePath, normalizeDroppedPath } from "./context/clipboard.js";
 import { existsSync } from "node:fs";
@@ -28,6 +29,9 @@ import { existsSync } from "node:fs";
  * GEMINI_CODE_ORCHESTRATOR=0 to go back to one tab doing everything.
  */
 const ORCHESTRATOR_MODE = process.env.GEMINI_CODE_ORCHESTRATOR !== "0";
+
+/** Kept in step with package.json by `npm version`. */
+export const VERSION = "0.2.0";
 import { openChrome, ensureChromeRunning } from "./scripts/openChrome.js";
 import { checkLogin } from "./scripts/login.js";
 import { c } from "./ui/format.js";
@@ -97,12 +101,12 @@ async function main() {
 
   // Banner, Claude Code style.
   console.log(`
-${c.magenta("✻")} ${c.bold("gemini-code")} ${c.dim("— Claude-Code-style agent on the Gemini web UI")}
+${c.magenta("✻")} ${c.bold("gemini-code")} ${c.dim(`v${VERSION} — Claude-Code-style agent on the Gemini web UI`)}
 
   ${c.dim("cwd")}     ${path.basename(process.cwd())}
   ${c.dim("model")}   ${modelName}
   ${c.dim("context")} project tree (${tree.split("\n").length} lines)${memory ? `, ${MEMORY_FILENAME}` : ""}${docs.length ? `, ${docs.length} doc${docs.length > 1 ? "s" : ""} (${docs.map((d) => d.path).join(", ")})` : ""}
-  ${c.dim("tools")}   ${[...tools.map((t) => t.name), "delegate_tasks", "update_plan", "screenshot_page", "read_page"].join(", ")}
+  ${c.dim("tools")}   ${[...tools.map((t) => t.name), "delegate_tasks", "update_plan", "screenshot_page", "read_page", "browser_open", "browser_do"].join(", ")}
   ${c.dim("workers")} up to ${MAX_PARALLEL_WORKERS} parallel Gemini tabs
   ${c.dim("mode")}    ${ORCHESTRATOR_MODE ? "orchestrator — main tab plans & validates, workers implement" : "solo — one tab does everything"}
 ${created ? `\n  ${c.green("✓")} created ${MEMORY_FILENAME} for durable project memory` : ""}${
@@ -132,7 +136,11 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
         new AgentSession(
           workerDriver,
           workerContext,
-          [createScreenshotTool(workerDriver), createBrowsePageTool(workerDriver)],
+          [
+            createScreenshotTool(workerDriver),
+            createBrowsePageTool(workerDriver),
+            ...createBrowserTools(workerDriver),
+          ],
           undefined,
           "worker"
         ),
@@ -145,6 +153,7 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
         createUpdatePlanTool(journal),
         createScreenshotTool(driver),
         createBrowsePageTool(driver),
+        ...createBrowserTools(driver),
       ],
       journal,
       ORCHESTRATOR_MODE ? "orchestrator" : "solo"
@@ -452,7 +461,7 @@ async function cli(): Promise<void> {
       return;
     case "-v":
     case "--version": {
-      console.log("gemini-code 0.1.0");
+      console.log(`gemini-code ${VERSION}`);
       return;
     }
     default:
