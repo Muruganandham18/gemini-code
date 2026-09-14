@@ -1,0 +1,43 @@
+{
+  "name": "gemini-code",
+  "version": "0.1.0",
+  "description": "Claude-Code-style coding agent that drives the Gemini web UI via Playwright (for orgs with a Gemini Pro web plan but no API/CLI access).",
+  "type": "module",
+  "scripts": {
+    "test": "tsx src/tests/smoke.ts",
+    "test:browser": "tsx src/tests/browser-smoke.ts",
+    "test:e2e": "tsx src/tests/e2e.ts",
+    "open-chrome": "tsx src/scripts/openChrome.ts",
+    "login": "tsx src/scripts/login.ts",
+    "dev": "tsx src/cli.ts",
+    "build": "tsc -p . && chmod +x dist/cli.js",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "playwright": "^1.47.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  },
+  "bin": {
+    "gemini-code": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "gemini",
+    "ai",
+    "cli",
+    "coding-agent",
+    "playwright",
+    "llm"
+  ]
+}
