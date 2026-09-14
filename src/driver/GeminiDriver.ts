@@ -122,11 +122,29 @@ export class GeminiDriver implements IGeminiDriver {
     // never exits — scripts appeared to hang long after finishing.
     this.connection = browser;
     this.context = browser.contexts()[0] ?? (await browser.newContext());
-    const existing = this.context.pages().find((p) => p.url().includes("gemini.google.com"));
-    this.page = existing ?? this.context.pages()[0] ?? (await this.context.newPage());
-    if (!this.page.url().includes("gemini.google.com")) {
-      await this.page.goto(GEMINI_URL, { waitUntil: "domcontentloaded" });
+
+    // Claim a tab nobody else is driving. Several gemini-code instances can
+    // share one browser, and taking "the first Gemini tab" meant a second
+    // instance would type into a tab another one was mid-conversation in —
+    // both then fight over the same composer.
+    const candidates = this.context.pages().filter((p) => p.url().includes("gemini.google.com"));
+    let claimed: Page | undefined;
+    for (const candidate of candidates) {
+      if (!(await this.isTabOwnedByAnother(candidate))) {
+        claimed = candidate;
+        break;
+      }
     }
+
+    if (!claimed) {
+      claimed = await this.context.newPage();
+      await claimed.goto(GEMINI_URL, { waitUntil: "domcontentloaded" });
+    } else if (!claimed.url().includes("gemini.google.com")) {
+      await claimed.goto(GEMINI_URL, { waitUntil: "domcontentloaded" });
+    }
+
+    this.page = claimed;
+    await this.claimTab(claimed);
     await this.waitForAppShell();
   }
 
@@ -208,6 +226,34 @@ export class GeminiDriver implements IGeminiDriver {
     throw new Error(
       "Timed out waiting for sign-in. Run `gemini-code login`, sign in, then try again."
     );
+  }
+
+  /**
+   * Is another LIVE gemini-code driving this tab?
+   *
+   * Ownership is stamped into the page as a pid. Checking the pid is still
+   * alive (cheap, and they're all local processes) means a tab left behind
+   * by a crashed run is reclaimed rather than stranded forever.
+   */
+  private async isTabOwnedByAnother(page: Page): Promise<boolean> {
+    const owner = await page
+      .evaluate(() => (window as unknown as { __geminiCodeOwner?: { pid?: number } }).__geminiCodeOwner)
+      .catch(() => undefined);
+    const pid = owner?.pid;
+    if (!pid || pid === process.pid) return false;
+    try {
+      process.kill(pid, 0); // signal 0 just tests for existence
+      return true;
+    } catch {
+      return false; // owner is gone — the tab is free
+    }
+  }
+
+  /** Stamps this process's ownership on a tab, surviving reloads. */
+  private async claimTab(page: Page): Promise<void> {
+    const script = `window.__geminiCodeOwner = { pid: ${process.pid}, ts: Date.now() };`;
+    await page.addInitScript({ content: script }).catch(() => undefined);
+    await page.evaluate(script).catch(() => undefined);
   }
 
   /** Reads the currently selected model from the picker's aria-label. */
@@ -689,6 +735,7 @@ export class GeminiDriver implements IGeminiDriver {
     // shared browser or the CDP connection the parent owns.
     child.ownsPage = true;
     await child.waitForAppShell();
+    await child.claimTab(page);
     // Brand worker tabs with a close guard: these are the ones a user is
     // most likely to shut by accident mid-task, since they appear
     // unannounced while the agent is working.
@@ -728,6 +775,97 @@ export class GeminiDriver implements IGeminiDriver {
       } else {
         await page.screenshot({ path: outPath, fullPage: opts.fullPage ?? false });
       }
+      return { title: await page.title().catch(() => ""), url: page.url() };
+    } finally {
+      await page.close().catch(() => undefined);
+    }
+  }
+
+  /**
+   * Loads a page in a throwaway tab and extracts what a reader would see.
+   *
+   * The difference from a plain HTTP fetch is JavaScript: docs sites, SPAs
+   * and dashboards serve an empty shell to curl, so fetch_url returns
+   * markup with no content in it. Rendering first is the only way to read
+   * them.
+   */
+  async readPageText(
+    url: string,
+    opts: { selector?: string; clickSelector?: string; includeLinks?: boolean; waitMs?: number } = {}
+  ): Promise<{ title: string; url: string; text: string; links: string[] }> {
+    const context = this.context;
+    if (!context) throw new Error("Cannot browse before attach()/launch().");
+
+    const page = await context.newPage();
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 });
+      await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => undefined);
+
+      if (opts.clickSelector) {
+        await page
+          .locator(opts.clickSelector)
+          .first()
+          .click({ timeout: 10_000 })
+          .catch(() => undefined);
+        await page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => undefined);
+      }
+      await page.waitForTimeout(opts.waitMs ?? 600);
+
+      const scope = opts.selector ? page.locator(opts.selector).first() : undefined;
+      if (scope) await scope.waitFor({ timeout: 15_000 });
+
+      // Prefer the semantic content region: it strips nav, cookie bars and
+      // footers that otherwise dominate the extraction.
+      const text = scope
+        ? await scope.innerText()
+        : await page.evaluate(() => {
+            const main = document.querySelector("main, article, [role='main']");
+            return ((main as HTMLElement) ?? document.body).innerText;
+          });
+
+      const links = opts.includeLinks
+        ? await page.evaluate(() =>
+            Array.from(document.querySelectorAll("a[href]"))
+              .map((a) => `${(a as HTMLElement).innerText.trim().slice(0, 80)} -> ${(a as HTMLAnchorElement).href}`)
+              .filter((l) => !l.startsWith(" ->"))
+              .slice(0, 120)
+          )
+        : [];
+
+      return { title: await page.title().catch(() => ""), url: page.url(), text: text.trim(), links };
+    } finally {
+      await page.close().catch(() => undefined);
+    }
+  }
+
+  /**
+   * Renders a page to PDF in a throwaway tab.
+   *
+   * Better than a screenshot for anything long: a full-page PNG of a docs
+   * page is an enormous unreadable strip, whereas a PDF keeps the text
+   * selectable, paginated and small — and Gemini reads PDFs natively.
+   *
+   * Playwright documents page.pdf() as headless-only, but it works fine
+   * against this attached headed Chrome (verified, as does the underlying
+   * CDP Page.printToPDF).
+   */
+  async printPageToPdf(
+    url: string,
+    outPath: string,
+    opts: { screenMedia?: boolean } = {}
+  ): Promise<{ title: string; url: string }> {
+    const context = this.context;
+    if (!context) throw new Error("Cannot print before attach()/launch().");
+
+    const page = await context.newPage();
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 });
+      await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => undefined);
+      // Screen media by default: print stylesheets often strip the very
+      // layout you're trying to show the model.
+      if (opts.screenMedia !== false) await page.emulateMedia({ media: "screen" });
+      await page.waitForTimeout(600);
+      await page.pdf({ path: outPath, printBackground: true, format: "A4" });
       return { title: await page.title().catch(() => ""), url: page.url() };
     } finally {
       await page.close().catch(() => undefined);

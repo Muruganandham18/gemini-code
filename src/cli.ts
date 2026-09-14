@@ -17,6 +17,7 @@ import { createDelegateTool, MAX_PARALLEL_WORKERS } from "./agent/workers.js";
 import { PlanJournal, findResumablePlan, readPlan, clearPlan, PLAN_FILENAME } from "./context/plan.js";
 import { createUpdatePlanTool } from "./tools/updatePlan.js";
 import { createScreenshotTool } from "./tools/screenshot.js";
+import { createBrowsePageTool } from "./tools/browsePage.js";
 import { readClipboardImageDetailed, isImagePath, normalizeDroppedPath } from "./context/clipboard.js";
 import { existsSync } from "node:fs";
 
@@ -99,7 +100,7 @@ ${c.magenta("✻")} ${c.bold("gemini-code")} ${c.dim("— Claude-Code-style agen
   ${c.dim("cwd")}     ${path.basename(process.cwd())}
   ${c.dim("model")}   ${modelName}
   ${c.dim("context")} project tree (${tree.split("\n").length} lines)${memory ? `, ${MEMORY_FILENAME}` : ""}${docs.length ? `, ${docs.length} doc${docs.length > 1 ? "s" : ""} (${docs.map((d) => d.path).join(", ")})` : ""}
-  ${c.dim("tools")}   ${[...tools.map((t) => t.name), "delegate_tasks", "update_plan", "screenshot_page"].join(", ")}
+  ${c.dim("tools")}   ${[...tools.map((t) => t.name), "delegate_tasks", "update_plan", "screenshot_page", "read_page"].join(", ")}
   ${c.dim("workers")} up to ${MAX_PARALLEL_WORKERS} parallel Gemini tabs
   ${c.dim("mode")}    ${ORCHESTRATOR_MODE ? "orchestrator — main tab plans & validates, workers implement" : "solo — one tab does everything"}
 ${created ? `\n  ${c.green("✓")} created ${MEMORY_FILENAME} for durable project memory` : ""}${
@@ -129,7 +130,7 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
         new AgentSession(
           workerDriver,
           workerContext,
-          [createScreenshotTool(workerDriver)],
+          [createScreenshotTool(workerDriver), createBrowsePageTool(workerDriver)],
           undefined,
           "worker"
         ),
@@ -137,7 +138,12 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
     return new AgentSession(
       driver,
       ctx,
-      [delegate, createUpdatePlanTool(journal), createScreenshotTool(driver)],
+      [
+        delegate,
+        createUpdatePlanTool(journal),
+        createScreenshotTool(driver),
+        createBrowsePageTool(driver),
+      ],
       journal,
       ORCHESTRATOR_MODE ? "orchestrator" : "solo"
     );
