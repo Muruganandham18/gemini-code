@@ -15,6 +15,9 @@ import { formatToolResult, buildContextDocument, buildSystemPrimer } from "../ag
 import { AgentSession } from "../agent/loop.js";
 import type { IGeminiDriver, GeminiResponse } from "../driver/IGeminiDriver.js";
 import { readFileTool } from "../tools/readFile.js";
+import { editFileTool } from "../tools/editFile.js";
+import { searchCodeTool } from "../tools/searchCode.js";
+import { gitStatusTool, gitDiffTool } from "../tools/git.js";
 import { writeFileTool } from "../tools/writeFile.js";
 import { bashTool, checkOutputTool, killProcessTool, looksLongRunning } from "../tools/bash.js";
 import { fetchUrlTool } from "../tools/fetchUrl.js";
@@ -245,6 +248,90 @@ async function main() {
     const bad = await checkOutputTool.run({ id: "bg_nope" });
     assert.equal(bad.ok, false);
     assert.match(bad.output, /No background process/);
+  });
+
+  console.log("Editing, search and git:");
+  await test("edit_file changes only the targeted text", async () => {
+    const f = path.join(".tmp-test", "edit.ts");
+    await writeFileTool.run({ path: f, content: "const a = 1;\nconst b = 2;\nconst c = 3;\n" });
+    const r = await editFileTool.run({ path: f, old_text: "const b = 2;", new_text: "const b = 20;" });
+    assert.equal(r.ok, true, r.output);
+    const after = await readFile(path.resolve(f), "utf8");
+    assert.equal(after, "const a = 1;\nconst b = 20;\nconst c = 3;\n", "surrounding lines must be untouched");
+  });
+
+  await test("edit_file REFUSES an ambiguous match rather than guessing", async () => {
+    // The whole safety property: picking "the first one" would silently
+    // edit a line the model didn't mean.
+    const f = path.join(".tmp-test", "dup.ts");
+    await writeFileTool.run({ path: f, content: "x = 1;\nx = 1;\n" });
+    const r = await editFileTool.run({ path: f, old_text: "x = 1;", new_text: "x = 2;" });
+    assert.equal(r.ok, false);
+    assert.match(r.output, /appears 2 times/);
+    const untouched = await readFile(path.resolve(f), "utf8");
+    assert.equal(untouched, "x = 1;\nx = 1;\n", "the file must not be modified on an ambiguous edit");
+
+    const all = await editFileTool.run({ path: f, old_text: "x = 1;", new_text: "x = 2;", replace_all: true });
+    assert.equal(all.ok, true);
+    assert.equal(await readFile(path.resolve(f), "utf8"), "x = 2;\nx = 2;\n");
+  });
+
+  await test("edit_file explains a miss instead of corrupting the file", async () => {
+    const f = path.join(".tmp-test", "edit.ts");
+    const before = await readFile(path.resolve(f), "utf8");
+    const r = await editFileTool.run({ path: f, old_text: "not in the file", new_text: "y" });
+    assert.equal(r.ok, false);
+    assert.match(r.output, /match character for character/);
+    assert.equal(await readFile(path.resolve(f), "utf8"), before, "file unchanged after a failed edit");
+  });
+
+  await test("read_file returns verbatim text that edit_file can match", async () => {
+    // Line numbers in read_file output would make every edit fail, since
+    // the model copies from it into old_text.
+    const f = path.join(".tmp-test", "verbatim.ts");
+    await writeFileTool.run({ path: f, content: "alpha\nbeta\ngamma\n" });
+    const read = await readFileTool.run({ path: f });
+    assert.ok(!/^\s*\d+\s/m.test(read.output), "must not prefix lines with numbers");
+    const edit = await editFileTool.run({ path: f, old_text: "beta", new_text: "delta" });
+    assert.equal(edit.ok, true, "text copied from read_file must match");
+  });
+
+  await test("read_file windows a large file instead of dumping it", async () => {
+    const f = path.join(".tmp-test", "big.txt");
+    await writeFileTool.run({ path: f, content: Array.from({ length: 900 }, (_, i) => `line ${i + 1}`).join("\n") });
+    const head = await readFileTool.run({ path: f });
+    assert.match(head.output, /more lines/, "should say there's more rather than returning everything");
+    assert.ok(!head.output.includes("line 900"), "must not dump the whole file");
+
+    const windowed = await readFileTool.run({ path: f, offset: 500, limit: 3 });
+    assert.match(windowed.output, /line 500/);
+    assert.match(windowed.output, /line 502/);
+    assert.ok(!windowed.output.includes("line 503"));
+  });
+
+  await test("search_code finds matches and skips noise directories", async () => {
+    const r = await searchCodeTool.run({ pattern: "looksLikeAbandonedWork", glob: "*.ts" });
+    assert.equal(r.ok, true);
+    assert.match(r.output, /toolCallParser\.ts:\d+/);
+    assert.ok(!r.output.includes("node_modules"), "must not search dependencies");
+
+    // Built at runtime so the literal never appears in this file — the
+    // first version of this test matched its own source and "failed".
+    const absent = ["zq7", "nope", "marker"].join("_");
+    const none = await searchCodeTool.run({ pattern: absent });
+    assert.match(none.output, /No matches/);
+
+    const bad = await searchCodeTool.run({ pattern: "([unclosed" });
+    assert.equal(bad.ok, false);
+    assert.match(bad.output, /invalid regular expression/);
+  });
+
+  await test("git_status and git_diff report on the working tree", async () => {
+    const status = await gitStatusTool.run({});
+    assert.equal(status.ok, true, status.output);
+    assert.match(status.output, /On branch/);
+    const diff = await gitDiffTool.run({ stat: true });
+    assert.equal(diff.ok, true, diff.output);
   });
 
   console.log("Agent loop (against a fake driver, no real browser):");

@@ -210,6 +210,27 @@ Everything is spawned in its own **process group**, so killing takes the whole t
 down — otherwise `npm run dev` orphans the node server, which keeps holding its
 port after the agent is gone. Anything still running is stopped when the CLI exits.
 
+### Working in real code
+
+The composer budget is the binding constraint, so the file tools are built to move
+as little text through the thread as possible:
+
+- **`edit_file`** replaces an exact piece of text, leaving the rest alone. Changing
+  a constant in a 600-line file costs a few hundred bytes instead of regenerating
+  6 KB — and regeneration silently loses anything the model doesn't reproduce
+  exactly. An ambiguous match is **refused**, never guessed, so it can't quietly
+  edit the wrong line.
+- **`search_code`** finds things by regex (`file:line`) without reading files.
+- **`read_file`** takes `offset`/`limit` and windows large files rather than
+  dumping them. It returns text **verbatim, without line numbers** — deliberately,
+  because the model copies from it straight into `edit_file`, and a `42 ` prefix
+  would make every edit fail to match.
+- **`git_status` / `git_diff`** let it review what it actually changed before
+  calling a task done. Read-only, so no confirmation.
+
+A real run against a 600-line file: `search_code` → `read_file` (9 lines) →
+`edit_file` (1 replacement), with all 199 functions intact.
+
 ### Context
 
 - **Project tree** — built at startup so Gemini knows the layout without spending
@@ -274,7 +295,7 @@ like a password: never commit it, never copy it around. It's gitignored here.
 ## Development
 
 ```bash
-npm test             # 46 tests: parser, tools, loop, workers, plan, context
+npm test             # 53 tests: parser, tools, loop, workers, plan, context
 npm run test:browser # headless Chromium: launch + logged-out detection
 npm run test:e2e     # REAL Gemini round trip (needs open-chrome + sign-in)
 npm run dev          # run from source without building

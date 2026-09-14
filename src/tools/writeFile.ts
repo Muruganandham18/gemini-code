@@ -5,7 +5,11 @@ import { confirmAction } from "./confirm.js";
 
 export const writeFileTool: ToolDefinition = {
   name: "write_file",
-  description: `write_file(args: {path: string, content: string}) -> writes/overwrites a file (creates parent dirs). Path is resolved relative to the project root. You will be asked to confirm before each write.`,
+  description:
+    `write_file(args: {path: string, content: string}) -> writes a file in full, creating parent dirs. Use this for ` +
+    `NEW files. To change an existing file use edit_file instead — rewriting a whole file to alter part of it is ` +
+    `slow and silently loses anything you don't reproduce exactly. Path is relative to the project root. ` +
+    `You will be asked to confirm before each write.`,
   async run(args) {
     const rel = String(args.path ?? "");
     const content = String(args.content ?? "");
