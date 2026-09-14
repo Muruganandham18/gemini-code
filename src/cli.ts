@@ -15,6 +15,9 @@ import { tools } from "./tools/index.js";
 import { createDelegateTool, MAX_PARALLEL_WORKERS } from "./agent/workers.js";
 import { PlanJournal, findResumablePlan, readPlan, clearPlan, PLAN_FILENAME } from "./context/plan.js";
 import { createUpdatePlanTool } from "./tools/updatePlan.js";
+import { createScreenshotTool } from "./tools/screenshot.js";
+import { readClipboardImage, isImagePath, normalizeDroppedPath } from "./context/clipboard.js";
+import { existsSync } from "node:fs";
 
 /**
  * Master/worker by default: the main tab plans, delegates and validates,
@@ -36,6 +39,8 @@ ${modelHelp()
     .join("\n")}
   ${c.cyan("/thinking on|off")}  extended thinking (slower, deeper)
   ${c.cyan("/clear")}            start a fresh conversation thread
+  ${c.cyan("/paste")}            attach an image from the clipboard
+  ${c.cyan("/image <path>")}     attach an image file (or just drag one in)
   ${c.cyan("/plan")}             show the current plan / progress journal
   ${c.cyan("/plan clear")}       delete ${PLAN_FILENAME}
   ${c.cyan("/memory")}           show ${MEMORY_FILENAME}
@@ -89,7 +94,7 @@ ${c.magenta("✻")} ${c.bold("gemini-code")} ${c.dim("— Claude-Code-style agen
   ${c.dim("cwd")}     ${path.basename(process.cwd())}
   ${c.dim("model")}   ${modelName}
   ${c.dim("context")} project tree (${tree.split("\n").length} lines)${memory ? `, ${MEMORY_FILENAME}` : ""}${docs.length ? `, ${docs.length} doc${docs.length > 1 ? "s" : ""} (${docs.map((d) => d.path).join(", ")})` : ""}
-  ${c.dim("tools")}   ${[...tools.map((t) => t.name), "delegate_tasks", "update_plan"].join(", ")}
+  ${c.dim("tools")}   ${[...tools.map((t) => t.name), "delegate_tasks", "update_plan", "screenshot_page"].join(", ")}
   ${c.dim("workers")} up to ${MAX_PARALLEL_WORKERS} parallel Gemini tabs
   ${c.dim("mode")}    ${ORCHESTRATOR_MODE ? "orchestrator — main tab plans & validates, workers implement" : "solo — one tab does everything"}
 ${created ? `\n  ${c.green("✓")} created ${MEMORY_FILENAME} for durable project memory` : ""}${
@@ -116,12 +121,18 @@ ${c.dim("Type a task, or /help for commands. Typing while a task runs steers it.
         // Workers: no delegate tool (no nesting), no journal (the main
         // thread owns the plan), and the "worker" role so they report back
         // a short summary instead of pasting code into the orchestrator.
-        new AgentSession(workerDriver, workerContext, [], undefined, "worker"),
+        new AgentSession(
+          workerDriver,
+          workerContext,
+          [createScreenshotTool(workerDriver)],
+          undefined,
+          "worker"
+        ),
     });
     return new AgentSession(
       driver,
       ctx,
-      [delegate, createUpdatePlanTool(journal)],
+      [delegate, createUpdatePlanTool(journal), createScreenshotTool(driver)],
       journal,
       ORCHESTRATOR_MODE ? "orchestrator" : "solo"
     );
@@ -130,6 +141,13 @@ ${c.dim("Type a task, or /help for commands. Typing while a task runs steers it.
   // The resume plan is injected once, into the first session only — after
   // that it's either finished or superseded by the new run's own journal.
   let session = makeMainSession(memory, resumable?.raw);
+
+  /** Images staged by /paste or /image, sent with the next task. */
+  let stagedImages: string[] = [];
+  const stageImage = (file: string) => {
+    stagedImages.push(file);
+    console.log(`  ${c.green("✓")} attached ${path.basename(file)} — send a task to include it\n`);
+  };
 
   // Leave the journal marked interrupted if we're killed mid-task, so the
   // next run knows there's work to pick up.
@@ -189,6 +207,14 @@ ${c.dim("Type a task, or /help for commands. Typing while a task runs steers it.
       if (!task) continue;
       if (["exit", "quit", "/exit", "/quit"].includes(task.toLowerCase())) break;
 
+      // Dragging a file into most terminals inserts its (quoted) path —
+      // treat a bare image path as "attach this" rather than as a task.
+      const dropped = normalizeDroppedPath(task);
+      if (isImagePath(dropped) && existsSync(dropped)) {
+        stageImage(dropped);
+        continue;
+      }
+
       if (task.startsWith("/")) {
         const [cmd, ...rest] = task.slice(1).split(/\s+/);
         const arg = rest.join(" ");
@@ -226,6 +252,38 @@ ${c.dim("Type a task, or /help for commands. Typing while a task runs steers it.
               session = makeMainSession(await readMemory());
               console.log(`  ${c.green("✓")} fresh conversation thread\n`);
               break;
+
+            case "paste": {
+              const img = await readClipboardImage();
+              if (!img) {
+                console.log(
+                  `  ${c.yellow("no image on the clipboard")}` +
+                    `${process.platform !== "darwin" ? " (clipboard images are macOS-only)" : ""}\n` +
+                    `  ${c.dim("copy a screenshot (Cmd+Ctrl+Shift+4) then /paste, or use /image <path>")}\n`
+                );
+                break;
+              }
+              stageImage(img);
+              break;
+            }
+
+            case "image": {
+              if (!arg) {
+                console.log("  usage: /image <path-to-image>\n");
+                break;
+              }
+              const file = normalizeDroppedPath(arg);
+              if (!existsSync(file)) {
+                console.log(`  ${c.red("no such file")}: ${file}\n`);
+                break;
+              }
+              if (!isImagePath(file)) {
+                console.log(`  ${c.yellow("that doesn't look like an image")}: ${file}\n`);
+                break;
+              }
+              stageImage(file);
+              break;
+            }
 
             case "plan": {
               const current = await readPlan();
@@ -273,7 +331,10 @@ ${c.dim("Type a task, or /help for commands. Typing while a task runs steers it.
       }
 
       try {
+        const attachments = stagedImages;
+        stagedImages = [];
         const answer = await session.runTask(task, {
+          attachments,
           onEvent: (msg) => console.log(msg),
           // Anything typed while the task runs steers it on the next turn,
           // rather than sitting in the queue until the task is over.

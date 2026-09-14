@@ -307,7 +307,7 @@ export class GeminiDriver implements IGeminiDriver {
    * The button stays as a fallback for UIs//states where Enter inserts a
    * newline instead of submitting.
    */
-  async sendPrompt(text: string, opts: { attachFile?: string } = {}): Promise<void> {
+  async sendPrompt(text: string, opts: { attachFile?: string | string[] } = {}): Promise<void> {
     const page = this.requirePage();
 
     // Snapshot how many responses exist BEFORE sending. waitForResponseComplete()
@@ -324,8 +324,13 @@ export class GeminiDriver implements IGeminiDriver {
     await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
     await page.keyboard.press("Backspace");
 
-    if (opts.attachFile) {
-      await this.attachFile(opts.attachFile);
+    const attachments = opts.attachFile
+      ? Array.isArray(opts.attachFile)
+        ? opts.attachFile
+        : [opts.attachFile]
+      : [];
+    for (const file of attachments) {
+      await this.attachFile(file);
     }
 
     // insertText types the literal string (newlines included) without firing
@@ -402,6 +407,7 @@ export class GeminiDriver implements IGeminiDriver {
    */
   private async attachFile(filePath: string): Promise<void> {
     const page = this.requirePage();
+    const chipsBefore = await page.locator(selectors.attachmentChip).count().catch(() => 0);
 
     await page.locator(`${selectors.uploadButton} >> visible=true`).first().click({ timeout: 10_000 });
 
@@ -422,7 +428,7 @@ export class GeminiDriver implements IGeminiDriver {
       await page.locator(selectors.fileInput).first().setInputFiles(filePath, { timeout: 10_000 });
     }
 
-    await this.waitForAttachmentReady(path.basename(filePath));
+    await this.waitForAttachmentReady(path.basename(filePath), chipsBefore);
   }
 
   /**
@@ -430,19 +436,27 @@ export class GeminiDriver implements IGeminiDriver {
    * while the upload is still in flight silently drops the attachment, and
    * upload time scales with file size, so a fixed sleep isn't good enough.
    */
-  private async waitForAttachmentReady(fileName: string, timeoutMs = TIMEOUTS.attachment): Promise<void> {
+  private async waitForAttachmentReady(
+    fileName: string,
+    chipsBefore: number,
+    timeoutMs = TIMEOUTS.attachment
+  ): Promise<void> {
     const page = this.requirePage();
     const deadline = Date.now() + timeoutMs;
-    // The chip shows the filename, but ELLIPSIZES long ones — so match on a
-    // short leading slice rather than the whole stem (a 24-char match failed
-    // against a chip rendering "project-context-17893…md").
+    // Primary signal: one more attachment chip than before. Counting works
+    // for images (which render as a bare thumbnail with no filename) as well
+    // as documents. Filename text is kept only as a secondary signal, and
+    // matched on a short slice because long names get ellipsized.
     const stem = fileName.replace(/\.[^.]+$/, "").slice(0, 12);
     while (Date.now() < deadline) {
-      const seen = await page
-        .getByText(stem, { exact: false })
-        .first()
-        .isVisible()
-        .catch(() => false);
+      const chips = await page.locator(selectors.attachmentChip).count().catch(() => 0);
+      const seen =
+        chips > chipsBefore ||
+        (await page
+          .getByText(stem, { exact: false })
+          .first()
+          .isVisible()
+          .catch(() => false));
       if (seen) {
         // Chip is present; give the upload a beat to finish processing.
         await page.waitForTimeout(1_500);
@@ -650,6 +664,44 @@ export class GeminiDriver implements IGeminiDriver {
     // unannounced while the agent is working.
     await child.markTab(`🤖 gemini-code · ${label ?? "worker"}`, { guardClose: true });
     return child;
+  }
+
+  /**
+   * Opens a URL in a throwaway tab of the SAME browser and screenshots it.
+   *
+   * Same browser on purpose: it means a local dev server behind a login, or
+   * anything else you're already authenticated to, renders exactly as you
+   * see it. That also means the page is loaded WITH your session cookies,
+   * which is why the tool wrapping this asks for confirmation and shows the
+   * URL — see tools/screenshot.ts.
+   */
+  async screenshotPage(
+    url: string,
+    outPath: string,
+    opts: { fullPage?: boolean; selector?: string; viewport?: { width: number; height: number } } = {}
+  ): Promise<{ title: string; url: string }> {
+    const context = this.context;
+    if (!context) throw new Error("Cannot screenshot before attach()/launch().");
+
+    const page = await context.newPage();
+    try {
+      if (opts.viewport) await page.setViewportSize(opts.viewport);
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 });
+      // Give client-rendered pages a moment to actually paint something.
+      await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => undefined);
+      await page.waitForTimeout(800);
+
+      if (opts.selector) {
+        const target = page.locator(opts.selector).first();
+        await target.waitFor({ timeout: 15_000 });
+        await target.screenshot({ path: outPath });
+      } else {
+        await page.screenshot({ path: outPath, fullPage: opts.fullPage ?? false });
+      }
+      return { title: await page.title().catch(() => ""), url: page.url() };
+    } finally {
+      await page.close().catch(() => undefined);
+    }
   }
 
   async close(): Promise<void> {

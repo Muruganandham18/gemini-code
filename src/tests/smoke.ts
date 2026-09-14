@@ -22,6 +22,7 @@ import { resolveModel, DEFAULT_MODEL_ALIAS, EXTENDED_THINKING } from "../driver/
 import { buildProjectTree } from "../context/projectTree.js";
 import { ensureMemoryFile, appendMemory, readMemory, MEMORY_FILENAME } from "../context/memory.js";
 import { collectProjectDocs } from "../context/projectDocs.js";
+import { isImagePath, normalizeDroppedPath } from "../context/clipboard.js";
 import { PlanJournal, readPlan, findResumablePlan, clearPlan } from "../context/plan.js";
 import { runParallelTasks, createDelegateTool, MAX_WORKER_REPORT_CHARS } from "../agent/workers.js";
 
@@ -327,6 +328,52 @@ async function main() {
     assert.equal(answer, "recovered");
     assert.equal(waits, 2, "waited twice");
     assert.equal(sends, 2, "must have re-sent the message, not just waited again");
+  });
+
+  console.log("Attachments (images & screenshots):");
+  await test("a tool that returns an attachment gets it sent with the result", async () => {
+    const shot = path.join(".tmp-test", "shot.png");
+    await writeFileTool.run({ path: shot, content: "fake-png" });
+    const fakeTool = {
+      name: "screenshot_page",
+      description: "screenshot_page(args) -> attaches an image",
+      run: async () => ({ ok: true, output: "Screenshot attached.", attachment: path.resolve(shot) }),
+    };
+    const driver = new FakeDriver([
+      toolCallResponse("screenshot_page", { url: "http://localhost:3000" }),
+      finalResponse("looks good"),
+    ]);
+    await new AgentSession(driver, {}, [fakeTool]).runTask("check the page");
+    assert.deepEqual(driver.attachedFiles[1], [path.resolve(shot)], "the image must ride along with the result");
+    assert.match(driver.sentMessages[1], /Screenshot attached/);
+  });
+
+  await test("user-supplied images are attached to the first message", async () => {
+    const img = path.resolve(".tmp-test", "mine.png");
+    await writeFileTool.run({ path: path.join(".tmp-test", "mine.png"), content: "x" });
+    const driver = new FakeDriver([finalResponse("ok")]);
+    await new AgentSession(driver).runTask("what is in this image?", { attachments: [img] });
+    assert.deepEqual(driver.attachedFiles[0], [img]);
+  });
+
+  await test("NEVER deletes a user's own file after sending it", async () => {
+    // Attachments we generate live in .gemini-code-tmp and are cleaned up;
+    // a file the user pointed at is theirs and must survive.
+    const mine = path.join(".tmp-test", "keep-me.png");
+    await writeFileTool.run({ path: mine, content: "precious" });
+    const absolute = path.resolve(mine);
+    const driver = new FakeDriver([finalResponse("ok")]);
+    await new AgentSession(driver).runTask("look at this", { attachments: [absolute] });
+    const survived = await readFile(absolute, "utf8").catch(() => undefined);
+    assert.equal(survived, "precious", "the user's file must still exist after being sent");
+  });
+
+  await test("recognises image paths, including dragged-in quoted ones", () => {
+    assert.ok(isImagePath("/tmp/a.png"));
+    assert.ok(isImagePath("shot.JPEG"));
+    assert.ok(!isImagePath("notes.txt"));
+    assert.equal(normalizeDroppedPath("'/tmp/my shot.png'"), "/tmp/my shot.png");
+    assert.equal(normalizeDroppedPath("/tmp/my\\ shot.png"), "/tmp/my shot.png");
   });
 
   console.log("Orchestrator / worker roles:");

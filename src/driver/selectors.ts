@@ -72,6 +72,16 @@ export const selectors = {
   /** The "Upload files" entry inside that menu. */
   uploadFilesText: /upload files/i,
 
+  /**
+   * The chip/preview that appears once a file finishes attaching.
+   *
+   * Counted rather than matched by filename: an IMAGE attachment renders as
+   * a thumbnail with no filename text at all, so the original
+   * "wait for the filename to appear" check timed out on every pasted
+   * screenshot even though the upload had succeeded.
+   */
+  attachmentChip: '[class*="attachment" i], [class*="file-preview" i]',
+
   /** Button visible only while Gemini is still generating a response. */
   stopButton: 'button[aria-label^="Stop" i]',
 
