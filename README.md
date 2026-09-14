@@ -118,6 +118,9 @@ Typing **while a task runs** steers it — your text is folded into the next tur
 | `GEMINI_CODE_TURN_RETRIES` | `2` | re-sends before a turn fails |
 | `GEMINI_CODE_WORKER_RETRIES` | `1` | worker retries in a fresh tab |
 | `GEMINI_CODE_MAX_REPORT_CHARS` | `2000` | cap on what a worker reports back |
+| `GEMINI_CODE_REMINDER_TURNS` | `5` | how often the tool-call contract is restated |
+| `GEMINI_CODE_DRIFT_NUDGES` | `2` | nudges when a reply abandons the protocol |
+| `GEMINI_CODE_BASH_TIMEOUT_MS` | `60000` | foreground command timeout |
 
 ## How it works
 
@@ -170,6 +173,23 @@ Gemini can see things, two ways:
 
 Files you supply are never deleted after sending; only images the agent generated
 in its own temp directory are cleaned up.
+
+### Protocol drift in long threads
+
+Prompted tool-calling degrades as a thread grows: the primer falls out of a context
+the web UI truncates without telling anyone, and Gemini reverts to chatting —
+"Sure, I'll create that file:" followed by the contents in a code block, with no
+tool call. To a parser that's indistinguishable from a finished answer, so the task
+would end having done nothing, which looks like the app ignoring the reply.
+
+Two mitigations: the tool-call contract is **restated every few turns**
+(`GEMINI_CODE_REMINDER_TURNS`), and a reply that pasted code while *announcing* an
+action gets **nudged back** to the protocol (`GEMINI_CODE_DRIFT_NUDGES`, default 2)
+rather than accepted. The nudges are capped so a genuine answer that happens to
+quote code can't cause a loop.
+
+If a session has gone very long and quality is dropping, `/clear` starts a fresh
+thread — the plan journal carries the work forward.
 
 ### Long-running commands
 
@@ -254,7 +274,7 @@ like a password: never commit it, never copy it around. It's gitignored here.
 ## Development
 
 ```bash
-npm test             # 42 tests: parser, tools, loop, workers, plan, context
+npm test             # 46 tests: parser, tools, loop, workers, plan, context
 npm run test:browser # headless Chromium: launch + logged-out detection
 npm run test:e2e     # REAL Gemini round trip (needs open-chrome + sign-in)
 npm run dev          # run from source without building

@@ -164,3 +164,15 @@ export function buildContextDocument(context: PrimerContext): string | undefined
 export function formatToolResult(output: string): string {
   return `TOOL_RESULT >>>\n${output}\n<<< END_TOOL_RESULT`;
 }
+
+/**
+ * A compact restatement of the tool-call contract.
+ *
+ * Re-sent periodically, and whenever a reply looks like it abandoned the
+ * protocol, because the full primer drifts out of a long thread's context.
+ */
+export function buildProtocolReminder(): string {
+  return `REMINDER — you are driving tools, not chatting. To act, reply with ONLY a code block containing:
+{"name": "<tool_name>", "args": { ... }}
+and nothing else. Do not paste file contents as an answer; write them with write_file. If the task really is finished, reply in plain prose with NO code block.`;
+}

@@ -6,11 +6,12 @@ import type { ToolDefinition } from "../types.js";
 import {
   buildSystemPrimer,
   buildContextDocument,
+  buildProtocolReminder,
   formatToolResult,
   type PrimerContext,
   type AgentRole,
 } from "./promptTemplate.js";
-import { parseGeminiReply } from "./toolCallParser.js";
+import { parseGeminiReply, looksLikeAbandonedWork } from "./toolCallParser.js";
 import { toolCallLine, toolResultLine, noteLine } from "../ui/format.js";
 import type { PlanJournal } from "../context/plan.js";
 
@@ -32,6 +33,15 @@ const MAX_INLINE_RESULT_CHARS = 4_000;
 const MAX_INLINE_CONTEXT_CHARS = 2_500;
 
 const TMP_DIR = ".gemini-code-tmp";
+
+/**
+ * How often the tool-call contract is restated, and how many times a reply
+ * that abandoned it gets nudged. Long threads drift: the primer falls out
+ * of a context the web UI truncates without telling us, and Gemini reverts
+ * to chatting instead of calling tools.
+ */
+const REMINDER_EVERY_TURNS = Math.max(0, Number(process.env.GEMINI_CODE_REMINDER_TURNS ?? 5));
+const MAX_DRIFT_NUDGES = Math.max(0, Number(process.env.GEMINI_CODE_DRIFT_NUDGES ?? 2));
 
 /** Transient driver failures (send/response) are retried this many times. */
 const TURN_RETRIES = Math.max(0, Number(process.env.GEMINI_CODE_TURN_RETRIES ?? 2));
@@ -82,6 +92,7 @@ export class AgentSession {
     await this.journal?.begin(userTask);
     let message = userTask;
     let attachFile: string[] = [...(options.attachments ?? [])];
+    let driftNudges = 0;
 
     if (!this.primed) {
       this.primed = true;
@@ -116,6 +127,13 @@ export class AgentSession {
           message;
       }
 
+      // Periodically restate the contract before it drifts out of a long
+      // thread's context — cheap insurance against the model reverting to
+      // chatting instead of calling tools.
+      if (REMINDER_EVERY_TURNS > 0 && turn > 0 && turn % REMINDER_EVERY_TURNS === 0) {
+        message = `${buildProtocolReminder()}\n\n${message}`;
+      }
+
       const reply = await this.exchange(message, attachFile, log);
       await this.cleanupAttachments(attachFile);
       attachFile = [];
@@ -123,6 +141,17 @@ export class AgentSession {
       const parsed = parseGeminiReply(reply);
 
       if (parsed.kind === "final") {
+        // A reply that pastes code while saying "I'll create the file" was
+        // trying to work and forgot how — accepting it would silently end
+        // the task having done nothing. Nudge, but only a couple of times,
+        // since a genuine answer may legitimately quote code.
+        if (driftNudges < MAX_DRIFT_NUDGES && looksLikeAbandonedWork(reply)) {
+          driftNudges++;
+          log(noteLine(`reply had code but no tool call — restating the protocol (${driftNudges}/${MAX_DRIFT_NUDGES})`));
+          await this.journal?.log("protocol drift: reminded Gemini to use tools");
+          message = buildProtocolReminder();
+          continue;
+        }
         await this.journal?.complete(parsed.text);
         return parsed.text;
       }
