@@ -6,6 +6,13 @@ export interface ToolCall {
 export interface ToolResult {
   ok: boolean;
   output: string;
+  /**
+   * A local file to attach to the message carrying this result — how a tool
+   * hands Gemini something text can't express, like a screenshot. Files
+   * inside the agent's temp dir are deleted after sending; anything else
+   * (e.g. a user's own image) is left alone.
+   */
+  attachment?: string;
 }
 
 export interface ToolDefinition {

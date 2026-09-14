@@ -24,7 +24,7 @@ export interface IGeminiDriver {
    * when a tool result is too long to paste into the composer (the web UI
    * has a practical text-length limit that the API wouldn't).
    */
-  sendPrompt(text: string, opts?: { attachFile?: string }): Promise<void>;
+  sendPrompt(text: string, opts?: { attachFile?: string | string[] }): Promise<void>;
   waitForResponseComplete(opts?: { timeoutMs?: number; debounceMs?: number }): Promise<void>;
   getLastResponse(): Promise<GeminiResponse>;
 }

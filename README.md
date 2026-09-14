@@ -95,6 +95,8 @@ Type a task. `/help` lists commands. `exit` quits.
 | `/plan`, `/plan clear` | show / delete the progress journal |
 | `/memory`, `/remember <note>` | show / append durable project memory |
 | `/clear` | start a fresh Gemini thread |
+| `/paste` | attach an image from the clipboard (macOS) |
+| `/image <path>` | attach an image file — or just drag one into the terminal |
 | `/tools` | list tools available to Gemini |
 | `/exit` | quit |
 
@@ -145,6 +147,24 @@ delegate further, so it can't nest.
 
 Set `GEMINI_CODE_ORCHESTRATOR=0` for small one-off tasks where delegation is just
 overhead.
+
+### Images and screenshots
+
+Gemini can see things, two ways:
+
+- **You give it an image** — `/paste` pulls a screenshot straight off the
+  clipboard (Cmd+Ctrl+Shift+4 then `/paste`), `/image <path>` takes a file, and
+  dragging a file into the terminal attaches it too. A terminal can never receive
+  pasted image *data* — Cmd+V only ever delivers text — so `/paste` reads the
+  system pasteboard itself.
+- **It takes its own** — the `screenshot_page` tool opens a URL in a throwaway tab
+  of the same browser, captures it (optionally `fullPage`, or one `selector`), and
+  attaches the image to its next message. It works against localhost dev servers,
+  so the agent can look at the page it just built instead of reasoning about the
+  HTML blind. Confirmed per-URL, because the page loads with your session cookies.
+
+Files you supply are never deleted after sending; only images the agent generated
+in its own temp directory are cleaned up.
 
 ### Context
 
@@ -198,7 +218,7 @@ Worker tabs get a pinned title (`🤖 gemini-code · <name>`), a distinct favico
 
 ## Safety model
 
-`write_file`, `run_bash` and `fetch_url` each require a y/N confirmation showing
+`write_file`, `run_bash`, `fetch_url` and `screenshot_page` each require a y/N confirmation showing
 exactly what will happen (`fetch_url` shows the full URL, since a request can carry
 local data off the machine). Prompts are serialized so parallel workers can't
 interleave them. File tools refuse paths outside the project root.
@@ -210,7 +230,7 @@ like a password: never commit it, never copy it around. It's gitignored here.
 ## Development
 
 ```bash
-npm test             # 35 tests: parser, tools, loop, workers, plan, context
+npm test             # 39 tests: parser, tools, loop, workers, plan, context
 npm run test:browser # headless Chromium: launch + logged-out detection
 npm run test:e2e     # REAL Gemini round trip (needs open-chrome + sign-in)
 npm run dev          # run from source without building

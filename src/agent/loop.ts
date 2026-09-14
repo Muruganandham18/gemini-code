@@ -44,6 +44,8 @@ export interface RunTaskOptions {
    * mid-flight instead of waiting for it to finish and starting over.
    */
   getSteering?: () => string[];
+  /** Images/files the user attached to this task (e.g. a pasted screenshot). */
+  attachments?: string[];
 }
 
 export class AgentSession {
@@ -79,7 +81,7 @@ export class AgentSession {
 
     await this.journal?.begin(userTask);
     let message = userTask;
-    let attachFile: string | undefined;
+    let attachFile: string[] = [...(options.attachments ?? [])];
 
     if (!this.primed) {
       this.primed = true;
@@ -93,11 +95,11 @@ export class AgentSession {
       } else {
         // Too big for the composer — send the rules inline (they must not
         // depend on Gemini opening a file) and attach the knowledge.
-        attachFile = await this.writeContextFile(contextDoc);
-        log(noteLine(`context is ${contextDoc.length} chars — attaching ${path.basename(attachFile)}`));
+        attachFile.push(await this.writeContextFile(contextDoc));
+        log(noteLine(`context is ${contextDoc.length} chars — attaching context.md`));
         message =
           `${primer}\n\n---\n\nProject context (structure, memory, and the project's own docs) ` +
-          `is ATTACHED to this message as "${path.basename(attachFile)}". Read it first.\n\n` +
+          `is ATTACHED to this message as "context.md". Read it first.\n\n` +
           `---\n\nTASK:\n${userTask}`;
       }
     }
@@ -115,10 +117,8 @@ export class AgentSession {
       }
 
       const reply = await this.exchange(message, attachFile, log);
-      if (attachFile) {
-        await rm(attachFile, { force: true }).catch(() => {});
-        attachFile = undefined;
-      }
+      await this.cleanupAttachments(attachFile);
+      attachFile = [];
 
       const parsed = parseGeminiReply(reply);
 
@@ -148,11 +148,17 @@ export class AgentSession {
         `${name}(${truncateArgs(args)}) -> ${result.ok ? "ok" : "ERROR"}: ${result.output.replace(/\s+/g, " ").slice(0, 160)}`
       );
 
-      if (result.output.length > MAX_INLINE_RESULT_CHARS) {
-        attachFile = await this.writeAttachment(name, args, result.output);
-        log(noteLine(`too long to paste — attaching ${path.basename(attachFile)}`));
+      if (result.attachment) {
+        // A tool handed back a file (e.g. a screenshot) for Gemini to see.
+        attachFile.push(result.attachment);
+        log(noteLine(`attaching ${path.basename(result.attachment)}`));
+        message = formatToolResult(result.output);
+      } else if (result.output.length > MAX_INLINE_RESULT_CHARS) {
+        attachFile.push(await this.writeAttachment(name, args, result.output));
+        const attached = attachFile[attachFile.length - 1];
+        log(noteLine(`too long to paste — attaching ${path.basename(attached)}`));
         message = formatToolResult(
-          `Output was too long to paste (${result.output.length} characters), so it is ATTACHED to this message as "${path.basename(attachFile)}". Read the attached file for the full result.`
+          `Output was too long to paste (${result.output.length} characters), so it is ATTACHED to this message as "${path.basename(attached)}". Read the attached file for the full result.`
         );
       } else {
         message = formatToolResult(result.output);
@@ -175,14 +181,14 @@ export class AgentSession {
    */
   private async exchange(
     message: string,
-    attachFile: string | undefined,
+    attachFile: string[],
     log: (msg: string) => void
   ) {
     let lastError: Error | undefined;
 
     for (let attempt = 0; attempt <= TURN_RETRIES; attempt++) {
       try {
-        if (attachFile && attempt === 0) {
+        if (attachFile.length && attempt === 0) {
           try {
             await this.driver.sendPrompt(message, { attachFile });
           } catch (err) {
@@ -190,7 +196,7 @@ export class AgentSession {
             // version rather than killing the task. Losing some context
             // beats losing the run.
             log(noteLine(`attachment failed (${(err as Error).message.split("\n")[0]}) — pasting truncated text instead`));
-            const inlineFallback = await readFile(attachFile, "utf8").catch(() => "");
+            const inlineFallback = await readFile(attachFile[0], "utf8").catch(() => "");
             await this.driver.sendPrompt(
               `${message}\n\n(The attachment didn't upload. Here is as much of it as fits:)\n\n` +
                 inlineFallback.slice(0, MAX_INLINE_RESULT_CHARS) +
@@ -216,6 +222,23 @@ export class AgentSession {
     }
 
     throw lastError ?? new Error("No response from Gemini after retries.");
+  }
+
+  /**
+   * Deletes attachments we generated, and ONLY those.
+   *
+   * Attachments can be the user's own files — a screenshot they pasted, an
+   * image they pointed at — and deleting those would be destroying their
+   * data as a side effect of sending a message. Only files inside our temp
+   * directory are ours to remove.
+   */
+  private async cleanupAttachments(files: string[]): Promise<void> {
+    const tmpDir = path.resolve(process.cwd(), TMP_DIR);
+    for (const file of files) {
+      if (path.resolve(file).startsWith(tmpDir + path.sep)) {
+        await rm(file, { force: true }).catch(() => {});
+      }
+    }
   }
 
   /** Writes the project-context document to a temp file for upload. */
