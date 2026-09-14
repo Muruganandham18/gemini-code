@@ -166,6 +166,18 @@ Gemini can see things, two ways:
   clipboard *text* to the process, so an image paste arrives as nothing at all and
   there's no keystroke to hook. Ctrl+V does reach the program, so that's the
   binding — same reason Claude Code uses it.
+- **It browses interactively** — `browser_open` opens a live tab and returns the
+  page text *plus a numbered list of its buttons, links and inputs*;
+  `browser_do` clicks them, types into them, submits, scrolls, goes back or
+  screenshots. The page stays open between calls, so it can click → look → type →
+  click again, the way a person does. Refs are numbered rather than CSS selectors
+  because asking a model to invent `div.css-1x7f2 > button:nth-child(3)` from a
+  text dump is guesswork that silently clicks the wrong thing.
+
+  Approval is **per origin**: this tab shares the browser's signed-in session, so
+  approving `example.com` must not silently authorise a hop to `mail.google.com`.
+  Each new origin is confirmed on arrival, and an action that navigates somewhere
+  unapproved is reversed.
 - **It takes its own** — the `screenshot_page` tool opens a URL in a throwaway tab
   of the same browser, captures it (optionally `fullPage`, or one `selector`), and
   attaches the image to its next message. It works against localhost dev servers,
@@ -302,7 +314,7 @@ like a password: never commit it, never copy it around. It's gitignored here.
 
 ```bash
 npm test             # 56 tests: parser, tools, loop, workers, plan, context
-npm run test:browser # headless Chromium: launch + logged-out detection
+npm run test:browser # headless Chromium: launch, logged-out detection, interactive browsing
 npm run test:e2e     # REAL Gemini round trip (needs open-chrome + sign-in)
 npm run dev          # run from source without building
 ```

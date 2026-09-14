@@ -872,6 +872,12 @@ export class GeminiDriver implements IGeminiDriver {
     }
   }
 
+  /** The shared browser context, for features that manage their own tabs. */
+  browserContext(): BrowserContext {
+    if (!this.context) throw new Error("Browser not started — call attach()/launch() first.");
+    return this.context;
+  }
+
   async close(): Promise<void> {
     if (this.ownsPage) {
       // A spawned worker tab: close just our own page.
