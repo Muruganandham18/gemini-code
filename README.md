@@ -94,6 +94,7 @@ Type a task. `/help` lists commands. `exit` quits.
 | `/model` | show current model |
 | `/model fastest\|fast\|pro` | switch model |
 | `/thinking on\|off` | extended thinking |
+| `/undo` | revert all file changes from the last task |
 | `/plan`, `/plan clear` | show / delete the progress journal |
 | `/memory`, `/remember <note>` | show / append durable project memory |
 | `/clear` | start a fresh Gemini thread |
@@ -227,6 +228,11 @@ as little text through the thread as possible:
   would make every edit fail to match.
 - **`git_status` / `git_diff`** let it review what it actually changed before
   calling a task done. Read-only, so no confirmation.
+- **`/undo`** reverts every file change from the last task — restoring what was
+  overwritten and deleting what was created. Snapshots are taken before each
+  write, grouped per task, which matters most with `GEMINI_CODE_AUTO_APPROVE=1`
+  where nobody is eyeballing each edit. Repeated edits to one file in a task
+  still restore the *pre-task* version, not an intermediate one.
 
 A real run against a 600-line file: `search_code` → `read_file` (9 lines) →
 `edit_file` (1 replacement), with all 199 functions intact.
@@ -295,7 +301,7 @@ like a password: never commit it, never copy it around. It's gitignored here.
 ## Development
 
 ```bash
-npm test             # 53 tests: parser, tools, loop, workers, plan, context
+npm test             # 56 tests: parser, tools, loop, workers, plan, context
 npm run test:browser # headless Chromium: launch + logged-out detection
 npm run test:e2e     # REAL Gemini round trip (needs open-chrome + sign-in)
 npm run dev          # run from source without building

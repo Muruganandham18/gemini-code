@@ -18,6 +18,7 @@ import { PlanJournal, findResumablePlan, readPlan, clearPlan, PLAN_FILENAME } fr
 import { createUpdatePlanTool } from "./tools/updatePlan.js";
 import { createScreenshotTool } from "./tools/screenshot.js";
 import { createBrowsePageTool } from "./tools/browsePage.js";
+import { checkpoints } from "./context/checkpoint.js";
 import { readClipboardImageDetailed, isImagePath, normalizeDroppedPath } from "./context/clipboard.js";
 import { existsSync } from "node:fs";
 
@@ -43,6 +44,7 @@ ${modelHelp()
   ${c.cyan("/clear")}            start a fresh conversation thread
   ${c.cyan("/paste")} or ${c.cyan("Ctrl+V")}  attach an image from the clipboard
   ${c.cyan("/image <path>")}     attach an image file (or just drag one in)
+  ${c.cyan("/undo")}             revert the file changes from the last task
   ${c.cyan("/plan")}             show the current plan / progress journal
   ${c.cyan("/plan clear")}       delete ${PLAN_FILENAME}
   ${c.cyan("/memory")}           show ${MEMORY_FILENAME}
@@ -329,6 +331,12 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
               break;
             }
 
+            case "undo": {
+              const result = await checkpoints.undoLast();
+              console.log(`  ${result.ok ? c.green("✓") : c.yellow("!")} ${result.message}\n`);
+              break;
+            }
+
             case "plan": {
               const current = await readPlan();
               if (!current) {
@@ -377,6 +385,7 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
       try {
         const attachments = stagedImages;
         stagedImages = [];
+        checkpoints.begin(task);
         const answer = await session.runTask(task, {
           attachments,
           onEvent: (msg) => console.log(msg),
@@ -395,8 +404,10 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
             return steer;
           },
         });
+        await checkpoints.commit();
         console.log(`\n${answer}\n`);
       } catch (err) {
+        await checkpoints.commit(); // keep snapshots from a failed run too
         // One failed task shouldn't kill the whole REPL session — report it
         // and keep the prompt alive so the browser/thread stays usable.
         console.error(`\n  ${c.red("✗")} ${(err as Error).message}\n`);

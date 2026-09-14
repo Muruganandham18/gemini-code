@@ -8,7 +8,7 @@
  * selector calibration (see README.md).
  */
 import assert from "node:assert/strict";
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseGeminiReply, looksLikeAbandonedWork } from "../agent/toolCallParser.js";
 import { formatToolResult, buildContextDocument, buildSystemPrimer } from "../agent/promptTemplate.js";
@@ -26,6 +26,7 @@ import { buildProjectTree } from "../context/projectTree.js";
 import { ensureMemoryFile, appendMemory, readMemory, MEMORY_FILENAME } from "../context/memory.js";
 import { collectProjectDocs } from "../context/projectDocs.js";
 import { isImagePath, normalizeDroppedPath } from "../context/clipboard.js";
+import { CheckpointStore } from "../context/checkpoint.js";
 import { PlanJournal, readPlan, findResumablePlan, clearPlan } from "../context/plan.js";
 import { runParallelTasks, createDelegateTool, MAX_WORKER_REPORT_CHARS } from "../agent/workers.js";
 
@@ -248,6 +249,53 @@ async function main() {
     const bad = await checkOutputTool.run({ id: "bg_nope" });
     assert.equal(bad.ok, false);
     assert.match(bad.output, /No background process/);
+  });
+
+  console.log("Checkpoints (/undo):");
+  await test("restores overwritten files and deletes newly-created ones", async () => {
+    const root = path.resolve(process.cwd(), ".tmp-test");
+    const store = new CheckpointStore(root);
+    const existing = path.join(root, "keep.txt");
+    const fresh = path.join(root, "new.txt");
+    await writeFileTool.run({ path: path.join(".tmp-test", "keep.txt"), content: "ORIGINAL" });
+
+    store.begin("do some damage");
+    await store.recordBeforeWrite(existing);
+    await writeFile(existing, "CLOBBERED", "utf8");
+    await store.recordBeforeWrite(fresh);
+    await writeFile(fresh, "brand new", "utf8");
+    await store.commit();
+
+    const result = await store.undoLast();
+    assert.equal(result.ok, true, result.message);
+    assert.equal(await readFile(existing, "utf8"), "ORIGINAL", "overwritten file must be restored");
+    const stillThere = await readFile(fresh, "utf8").catch(() => undefined);
+    assert.equal(stillThere, undefined, "a file created by the task must be removed again");
+  });
+
+  await test("keeps the FIRST version of a file edited repeatedly in one task", async () => {
+    // Undo should go back to before the task, not to the second-to-last edit.
+    const root = path.resolve(process.cwd(), ".tmp-test");
+    const store = new CheckpointStore(root);
+    const f = path.join(root, "multi.txt");
+    await writeFile(f, "v1", "utf8");
+
+    store.begin("edit twice");
+    await store.recordBeforeWrite(f);
+    await writeFile(f, "v2", "utf8");
+    await store.recordBeforeWrite(f);
+    await writeFile(f, "v3", "utf8");
+    await store.commit();
+
+    await store.undoLast();
+    assert.equal(await readFile(f, "utf8"), "v1", "must restore the pre-task state");
+  });
+
+  await test("undo with nothing recorded says so instead of failing", async () => {
+    const store = new CheckpointStore(path.resolve(process.cwd(), ".tmp-test", "empty"));
+    const r = await store.undoLast();
+    assert.equal(r.ok, false);
+    assert.match(r.message, /Nothing to undo/);
   });
 
   console.log("Editing, search and git:");
