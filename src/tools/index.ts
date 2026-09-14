@@ -1,5 +1,8 @@
 import type { ToolDefinition } from "../types.js";
 import { readFileTool } from "./readFile.js";
+import { editFileTool } from "./editFile.js";
+import { searchCodeTool } from "./searchCode.js";
+import { gitStatusTool, gitDiffTool } from "./git.js";
 import { writeFileTool } from "./writeFile.js";
 import { bashTool, checkOutputTool, killProcessTool } from "./bash.js";
 import { listFilesTool } from "./listFiles.js";
@@ -9,6 +12,10 @@ import { fetchUrlTool } from "./fetchUrl.js";
 export const tools: ToolDefinition[] = [
   readFileTool,
   writeFileTool,
+  editFileTool,
+  searchCodeTool,
+  gitStatusTool,
+  gitDiffTool,
   bashTool,
   checkOutputTool,
   killProcessTool,
