@@ -79,3 +79,24 @@ export function parseGeminiReply(response: GeminiResponse): ParseResult {
 
   return { kind: "final", text: response.text.trim() };
 }
+
+/**
+ * Detects a reply that MEANT to do work but didn't issue a tool call.
+ *
+ * In long threads Gemini drifts off the protocol — the primer is far back
+ * in a context the web UI silently truncates — and starts answering like a
+ * chatbot: "Sure, I'll create that file:" followed by the file contents in
+ * a code block. The parser can't tell that from a genuine final answer, so
+ * the loop ends and nothing happens, which looks exactly like the app
+ * ignoring the reply.
+ *
+ * The tell is not the code block on its own (a real answer may quote code)
+ * but code plus language announcing an action the agent was supposed to
+ * perform with a tool.
+ */
+export function looksLikeAbandonedWork(response: GeminiResponse): boolean {
+  if (response.codeBlocks.length === 0) return false;
+  return /\b(i'?ll |i will |let me |i'?m going to |here'?s the (code|file|script)|you can (run|save|copy)|create the file|save (this|it) (to|as)|add the following)/i.test(
+    response.text
+  );
+}

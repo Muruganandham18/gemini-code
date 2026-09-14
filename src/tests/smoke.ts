@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
-import { parseGeminiReply } from "../agent/toolCallParser.js";
+import { parseGeminiReply, looksLikeAbandonedWork } from "../agent/toolCallParser.js";
 import { formatToolResult, buildContextDocument, buildSystemPrimer } from "../agent/promptTemplate.js";
 import { AgentSession } from "../agent/loop.js";
 import type { IGeminiDriver, GeminiResponse } from "../driver/IGeminiDriver.js";
@@ -158,6 +158,48 @@ async function main() {
     const result = await bashTool.run({ command: "echo hello-from-bash" });
     assert.equal(result.ok, true);
     assert.match(result.output, /hello-from-bash/);
+  });
+
+  console.log("Protocol drift (long threads):");
+  await test("spots a reply that pasted code instead of calling a tool", () => {
+    assert.ok(looksLikeAbandonedWork({
+      text: "Sure! I'll create the file for you.\n\ndef add(a,b): return a+b",
+      codeBlocks: ["def add(a,b): return a+b"],
+    }));
+    assert.ok(looksLikeAbandonedWork({
+      text: "Here's the code — you can save it as app.py:",
+      codeBlocks: ["print('hi')"],
+    }));
+  });
+
+  await test("does not mistake a genuine answer that quotes code for drift", () => {
+    assert.ok(!looksLikeAbandonedWork({
+      text: "The bug is on line 4, where `add` returns a string.",
+      codeBlocks: ["return str(a+b)"],
+    }));
+    assert.ok(!looksLikeAbandonedWork({ text: "The version is 1.2.3.", codeBlocks: [] }));
+  });
+
+  await test("nudges a drifted reply back to tool calls instead of stopping", async () => {
+    const driver = new FakeDriver([
+      // Gemini forgets the protocol and pastes code...
+      { text: "I'll create the file now.\n\nprint('hi')", codeBlocks: ["print('hi')"] },
+      // ...then complies after the reminder.
+      toolCallResponse("write_file", { path: ".tmp-test/drift.py", content: "print('hi')" }),
+      finalResponse("Created it."),
+    ]);
+    const answer = await new AgentSession(driver).runTask("create a script");
+    assert.equal(answer, "Created it.", "must recover rather than ending with nothing done");
+    assert.match(driver.sentMessages[1], /REMINDER/, "should restate the contract");
+    assert.equal(driver.sentMessages.length, 3);
+  });
+
+  await test("gives up nudging so it can't loop forever on a real answer", async () => {
+    const stubborn = { text: "I'll do it: x=1", codeBlocks: ["x=1"] };
+    const driver = new FakeDriver([stubborn, stubborn, stubborn, stubborn]);
+    const answer = await new AgentSession(driver).runTask("do it");
+    assert.match(answer, /I'll do it/, "accepts it as final once the nudges are spent");
+    assert.ok(driver.sentMessages.length <= 4, "bounded, not an infinite nudge loop");
   });
 
   console.log("Long-running commands:");
