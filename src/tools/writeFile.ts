@@ -2,6 +2,7 @@ import { mkdir, writeFile as fsWriteFile } from "node:fs/promises";
 import path from "node:path";
 import type { ToolDefinition } from "../types.js";
 import { confirmAction } from "./confirm.js";
+import { checkpoints } from "../context/checkpoint.js";
 
 export const writeFileTool: ToolDefinition = {
   name: "write_file",
@@ -25,6 +26,8 @@ export const writeFileTool: ToolDefinition = {
     }
 
     try {
+      // Snapshot before clobbering, so /undo can put it back.
+      await checkpoints.recordBeforeWrite(abs);
       await mkdir(path.dirname(abs), { recursive: true });
       await fsWriteFile(abs, content, "utf8");
       return { ok: true, output: `Wrote ${content.length} bytes to ${rel}` };

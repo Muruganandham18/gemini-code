@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ToolDefinition } from "../types.js";
 import { confirmAction } from "./confirm.js";
+import { checkpoints } from "../context/checkpoint.js";
 
 /** Keeps the confirmation prompt readable when a replacement is large. */
 function preview(text: string, lines = 6): string {
@@ -80,6 +81,7 @@ export const editFileTool: ToolDefinition = {
       : content.replace(oldText, newText);
 
     try {
+      await checkpoints.recordBeforeWrite(abs);
       await writeFile(abs, updated, "utf8");
     } catch (err) {
       return { ok: false, output: `Error writing ${rel}: ${(err as Error).message}` };
