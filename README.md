@@ -60,28 +60,30 @@ npm link          # puts `gemini-code` on your PATH
 
 ## Use
 
-**1. Open Chrome and sign in (once):**
-
-```bash
-gemini-code open-chrome
-```
-
-Opens a normal Chrome window with a debug port, using a dedicated profile
-(`~/.gemini-code/profile`, separate from your everyday browsing). Sign in to Gemini
-by hand. Leave it open.
-
-**2. Verify:**
-
-```bash
-gemini-code login
-```
-
-**3. Run the agent in any project:**
+Just run it:
 
 ```bash
 cd ~/code/my-project
 gemini-code
 ```
+
+It starts Chrome itself if one isn't already running (a dedicated profile at
+`~/.gemini-code/profile`, separate from your everyday browsing), attaches, and goes.
+
+**The one manual step is signing in** — and only when you're actually signed out.
+The profile keeps the session, so that's typically once, not once per run. When it
+happens, the agent detects it, brings the Chrome window to the front, and waits
+while you sign in, then carries on by itself. In a non-interactive shell it fails
+immediately with instructions instead of blocking, since there's nobody there to
+sign in.
+
+Why signing in stays manual: Google deliberately blocks sign-in from
+automation-driven browsers, and this project doesn't try to defeat that (see
+[Why login is manual](#why-login-is-manual)). Nothing here ever touches your
+credentials.
+
+`gemini-code open-chrome` and `gemini-code login` still exist if you'd rather do
+those steps explicitly.
 
 Type a task. `/help` lists commands. `exit` quits.
 

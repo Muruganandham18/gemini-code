@@ -25,7 +25,7 @@ import { existsSync } from "node:fs";
  * GEMINI_CODE_ORCHESTRATOR=0 to go back to one tab doing everything.
  */
 const ORCHESTRATOR_MODE = process.env.GEMINI_CODE_ORCHESTRATOR !== "0";
-import { openChrome } from "./scripts/openChrome.js";
+import { openChrome, ensureChromeRunning } from "./scripts/openChrome.js";
 import { checkLogin } from "./scripts/login.js";
 import { c } from "./ui/format.js";
 
@@ -54,7 +54,11 @@ Anything else is sent to Gemini as a task.`;
 
 async function main() {
   const driver = new GeminiDriver();
-  console.log(c.dim("Attaching to Chrome (run `npm run open-chrome` first if this fails)..."));
+  // Start Chrome ourselves if it isn't already up, so the usual case is a
+  // single command. Signing in stays manual, but the profile keeps the
+  // session, so that's a one-time thing rather than a per-run step.
+  const launched = await ensureChromeRunning((m) => console.log(c.dim(m)));
+  if (launched) console.log(c.dim("Chrome is up, attaching..."));
   await driver.attach();
   await driver.ensureLoggedIn();
 

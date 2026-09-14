@@ -165,19 +165,49 @@ export class GeminiDriver implements IGeminiDriver {
     // match list down to visible elements before `.first()` picks one.
     const signIn = page.locator(`${selectors.signInButton} >> visible=true`).first();
 
-    if (await signIn.isVisible().catch(() => false)) {
-      console.log(
-        "\n[gemini-code] Not logged in yet. A browser window is open — " +
-          "sign in to your Google account there by hand.\n" +
-          "Waiting for login to complete (up to " + timeoutMs / 1000 + "s)...\n"
+    if (!(await signIn.isVisible().catch(() => false))) return; // already signed in
+
+    // Sessions do expire, so this isn't only a first-run path. Put the
+    // window in front of the user rather than silently blocking on a
+    // browser they may not even have visible.
+    await page.bringToFront().catch(() => undefined);
+
+    // Waiting 5 minutes for a human makes no sense with piped stdin — in a
+    // script there is nobody to sign in, so say so and fail immediately
+    // instead of hanging until the timeout.
+    if (!process.stdin.isTTY) {
+      throw new Error(
+        "Your Gemini session is signed out, and this isn't an interactive terminal.\n" +
+          "Run `gemini-code login` yourself, sign in in the Chrome window it brings up, then retry."
       );
-      await signIn.waitFor({ state: "detached", timeout: timeoutMs }).catch(() => {
-        throw new Error(
-          "Timed out waiting for manual login. Run `npm run login` again and sign in."
-        );
-      });
-      console.log("[gemini-code] Login detected, continuing.\n");
     }
+
+    const seconds = Math.round(timeoutMs / 1000);
+    console.log(
+      "\n[gemini-code] Your Gemini session is signed out.\n" +
+        "A Chrome window has been brought to the front — sign in there and I'll carry on automatically.\n" +
+        `(waiting up to ${seconds}s; nothing here touches your credentials)\n`
+    );
+
+    const started = Date.now();
+    let lastNotice = 0;
+    while (Date.now() - started < timeoutMs) {
+      if (!(await signIn.isVisible().catch(() => false))) {
+        console.log("[gemini-code] Signed in — continuing.\n");
+        return;
+      }
+      // A quiet heartbeat, so a long wait doesn't look like a hang.
+      const waited = Math.floor((Date.now() - started) / 1000);
+      if (waited - lastNotice >= 30) {
+        lastNotice = waited;
+        console.log(`[gemini-code] still waiting for sign-in (${waited}s)...`);
+      }
+      await page.waitForTimeout(1_000);
+    }
+
+    throw new Error(
+      "Timed out waiting for sign-in. Run `gemini-code login`, sign in, then try again."
+    );
   }
 
   /** Reads the currently selected model from the picker's aria-label. */
