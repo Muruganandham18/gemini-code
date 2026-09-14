@@ -97,7 +97,7 @@ Type a task. `/help` lists commands. `exit` quits.
 | `/plan`, `/plan clear` | show / delete the progress journal |
 | `/memory`, `/remember <note>` | show / append durable project memory |
 | `/clear` | start a fresh Gemini thread |
-| `/paste` | attach an image from the clipboard (macOS) |
+| `Ctrl+V` or `/paste` | attach an image from the clipboard (macOS) |
 | `/image <path>` | attach an image file — or just drag one into the terminal |
 | `/tools` | list tools available to Gemini |
 | `/exit` | quit |
@@ -154,11 +154,14 @@ overhead.
 
 Gemini can see things, two ways:
 
-- **You give it an image** — `/paste` pulls a screenshot straight off the
-  clipboard (Cmd+Ctrl+Shift+4 then `/paste`), `/image <path>` takes a file, and
-  dragging a file into the terminal attaches it too. A terminal can never receive
-  pasted image *data* — Cmd+V only ever delivers text — so `/paste` reads the
-  system pasteboard itself.
+- **You give it an image** — press **Ctrl+V** (not Cmd+V) to attach whatever
+  screenshot is on your clipboard; `/paste` does the same, `/image <path>` takes a
+  file, and dragging a file into the terminal works too.
+
+  It has to be **Ctrl+V**: macOS terminals handle Cmd+V themselves and deliver only
+  clipboard *text* to the process, so an image paste arrives as nothing at all and
+  there's no keystroke to hook. Ctrl+V does reach the program, so that's the
+  binding — same reason Claude Code uses it.
 - **It takes its own** — the `screenshot_page` tool opens a URL in a throwaway tab
   of the same browser, captures it (optionally `fullPage`, or one `selector`), and
   attaches the image to its next message. It works against localhost dev servers,
@@ -167,6 +170,25 @@ Gemini can see things, two ways:
 
 Files you supply are never deleted after sending; only images the agent generated
 in its own temp directory are cleaned up.
+
+### Long-running commands
+
+`npm run dev` and friends never exit, so running one in the foreground would block
+the agent until a timeout, then kill the server anyway. Those are detected and
+**started in the background** instead, returning a handle immediately:
+
+```
+⏺ run_bash(npm run dev)
+  ⎿ Started in the background as "bg_mu1kcjgg"
+⏺ check_output(id: bg_mu1kcjgg)
+⏺ kill_process(id: bg_mu1kcjgg)
+  ⎿ Stopped "bg_mu1kcjgg" and its children.
+```
+
+Set `background: true` explicitly for anything else that doesn't return.
+Everything is spawned in its own **process group**, so killing takes the whole tree
+down — otherwise `npm run dev` orphans the node server, which keeps holding its
+port after the agent is gone. Anything still running is stopped when the CLI exits.
 
 ### Context
 
@@ -232,7 +254,7 @@ like a password: never commit it, never copy it around. It's gitignored here.
 ## Development
 
 ```bash
-npm test             # 39 tests: parser, tools, loop, workers, plan, context
+npm test             # 42 tests: parser, tools, loop, workers, plan, context
 npm run test:browser # headless Chromium: launch + logged-out detection
 npm run test:e2e     # REAL Gemini round trip (needs open-chrome + sign-in)
 npm run dev          # run from source without building

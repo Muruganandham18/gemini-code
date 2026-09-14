@@ -18,7 +18,16 @@ const TMP_DIR = ".gemini-code-tmp";
  * Returns the file path, or undefined when the clipboard holds no image.
  */
 export async function readClipboardImage(cwd = process.cwd()): Promise<string | undefined> {
-  if (process.platform !== "darwin") return undefined;
+  return (await readClipboardImageDetailed(cwd)).path;
+}
+
+/** Same, but says why it failed — so the CLI can give a useful message. */
+export async function readClipboardImageDetailed(
+  cwd = process.cwd()
+): Promise<{ path?: string; reason?: string }> {
+  if (process.platform !== "darwin") {
+    return { reason: "clipboard images are only supported on macOS" };
+  }
 
   const dir = path.resolve(cwd, TMP_DIR);
   await mkdir(dir, { recursive: true });
@@ -48,11 +57,16 @@ export async function readClipboardImage(cwd = process.cwd()): Promise<string | 
 
   try {
     const { stdout } = await run("osascript", ["-e", script], { timeout: 15_000 });
-    if (!stdout.includes("OK")) return undefined;
+    if (stdout.includes("NO_IMAGE")) {
+      return { reason: "the clipboard has no image on it (copy a screenshot first)" };
+    }
+    if (!stdout.includes("OK")) {
+      return { reason: `could not read the clipboard: ${stdout.trim() || "unknown error"}` };
+    }
     const info = await stat(outPath);
-    return info.size > 0 ? outPath : undefined;
-  } catch {
-    return undefined;
+    return info.size > 0 ? { path: outPath } : { reason: "the clipboard image was empty" };
+  } catch (err) {
+    return { reason: `clipboard read failed: ${(err as Error).message.split("\n")[0]}` };
   }
 }
 

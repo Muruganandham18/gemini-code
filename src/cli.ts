@@ -12,11 +12,12 @@ import {
   modelHelp,
 } from "./driver/models.js";
 import { tools } from "./tools/index.js";
+import { killAllBackgroundProcesses } from "./tools/bash.js";
 import { createDelegateTool, MAX_PARALLEL_WORKERS } from "./agent/workers.js";
 import { PlanJournal, findResumablePlan, readPlan, clearPlan, PLAN_FILENAME } from "./context/plan.js";
 import { createUpdatePlanTool } from "./tools/updatePlan.js";
 import { createScreenshotTool } from "./tools/screenshot.js";
-import { readClipboardImage, isImagePath, normalizeDroppedPath } from "./context/clipboard.js";
+import { readClipboardImageDetailed, isImagePath, normalizeDroppedPath } from "./context/clipboard.js";
 import { existsSync } from "node:fs";
 
 /**
@@ -39,7 +40,7 @@ ${modelHelp()
     .join("\n")}
   ${c.cyan("/thinking on|off")}  extended thinking (slower, deeper)
   ${c.cyan("/clear")}            start a fresh conversation thread
-  ${c.cyan("/paste")}            attach an image from the clipboard
+  ${c.cyan("/paste")} or ${c.cyan("Ctrl+V")}  attach an image from the clipboard
   ${c.cyan("/image <path>")}     attach an image file (or just drag one in)
   ${c.cyan("/plan")}             show the current plan / progress journal
   ${c.cyan("/plan clear")}       delete ${PLAN_FILENAME}
@@ -106,7 +107,7 @@ ${created ? `\n  ${c.green("✓")} created ${MEMORY_FILENAME} for durable projec
       ? `\n  ${c.yellow("⟳")} found an unfinished plan in ${PLAN_FILENAME} (${resumable.status}) — your next task will continue it`
       : ""
   }
-${c.dim("Type a task, or /help for commands. Typing while a task runs steers it.")}
+${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing while a task runs steers it.")}
 `);
 
   /**
@@ -146,7 +147,7 @@ ${c.dim("Type a task, or /help for commands. Typing while a task runs steers it.
   // that it's either finished or superseded by the new run's own journal.
   let session = makeMainSession(memory, resumable?.raw);
 
-  /** Images staged by /paste or /image, sent with the next task. */
+  /** Images staged by Ctrl+V, /paste or /image, sent with the next task. */
   let stagedImages: string[] = [];
   const stageImage = (file: string) => {
     stagedImages.push(file);
@@ -157,6 +158,8 @@ ${c.dim("Type a task, or /help for commands. Typing while a task runs steers it.
   // next run knows there's work to pick up.
   const onSignal = async () => {
     await journal.markInterrupted("session terminated");
+    // Don't leave a dev server holding its port after we're gone.
+    killAllBackgroundProcesses();
     process.exit(130);
   };
   process.on("SIGINT", onSignal);
@@ -193,6 +196,38 @@ ${c.dim("Type a task, or /help for commands. Typing while a task runs steers it.
       resolve(null);
     }
   });
+
+  /**
+   * Ctrl+V pastes an image, NOT Cmd+V.
+   *
+   * macOS terminals handle Cmd+V themselves and only ever deliver clipboard
+   * *text* to the process — an image paste arrives as nothing at all, so
+   * there is no keystroke to hook. Ctrl+V does reach us (as \x16), so that's
+   * the binding, same as Claude Code.
+   */
+  let pasteBusy = false;
+  const onPasteKey = async () => {
+    if (pasteBusy) return;
+    pasteBusy = true;
+    try {
+      const { path: img, reason } = await readClipboardImageDetailed();
+      process.stdout.write("\n");
+      if (img) {
+        stageImage(img);
+      } else {
+        console.log(`  ${c.yellow(reason ?? "no image on the clipboard")}\n`);
+      }
+    } finally {
+      pasteBusy = false;
+      process.stdout.write(c.magenta("› "));
+    }
+  };
+
+  if (process.stdin.isTTY) {
+    process.stdin.on("keypress", (_str, key) => {
+      if (key?.ctrl && key.name === "v") void onPasteKey();
+    });
+  }
 
   const nextLine = (): Promise<string | null> => {
     if (queued.length) return Promise.resolve(queued.shift()!);
@@ -258,12 +293,11 @@ ${c.dim("Type a task, or /help for commands. Typing while a task runs steers it.
               break;
 
             case "paste": {
-              const img = await readClipboardImage();
+              const { path: img, reason } = await readClipboardImageDetailed();
               if (!img) {
                 console.log(
-                  `  ${c.yellow("no image on the clipboard")}` +
-                    `${process.platform !== "darwin" ? " (clipboard images are macOS-only)" : ""}\n` +
-                    `  ${c.dim("copy a screenshot (Cmd+Ctrl+Shift+4) then /paste, or use /image <path>")}\n`
+                  `  ${c.yellow(reason ?? "no image on the clipboard")}\n` +
+                    `  ${c.dim("copy a screenshot (Cmd+Ctrl+Shift+4), then Ctrl+V or /paste — or /image <path>")}\n`
                 );
                 break;
               }
@@ -364,6 +398,7 @@ ${c.dim("Type a task, or /help for commands. Typing while a task runs steers it.
     }
   } finally {
     rl.close();
+    killAllBackgroundProcesses();
     await driver.close();
   }
 }

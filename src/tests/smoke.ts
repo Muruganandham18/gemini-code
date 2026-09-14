@@ -16,7 +16,7 @@ import { AgentSession } from "../agent/loop.js";
 import type { IGeminiDriver, GeminiResponse } from "../driver/IGeminiDriver.js";
 import { readFileTool } from "../tools/readFile.js";
 import { writeFileTool } from "../tools/writeFile.js";
-import { bashTool } from "../tools/bash.js";
+import { bashTool, checkOutputTool, killProcessTool, looksLongRunning } from "../tools/bash.js";
 import { fetchUrlTool } from "../tools/fetchUrl.js";
 import { resolveModel, DEFAULT_MODEL_ALIAS, EXTENDED_THINKING } from "../driver/models.js";
 import { buildProjectTree } from "../context/projectTree.js";
@@ -158,6 +158,51 @@ async function main() {
     const result = await bashTool.run({ command: "echo hello-from-bash" });
     assert.equal(result.ok, true);
     assert.match(result.output, /hello-from-bash/);
+  });
+
+  console.log("Long-running commands:");
+  await test("recognises commands that never exit", () => {
+    for (const cmd of ["npm run dev", "pnpm dev", "vite", "npx nodemon app.js", "uvicorn main:app",
+                       "python3 -m http.server 8000", "tail -f log.txt", "next dev", "tsc --watch"]) {
+      assert.ok(looksLongRunning(cmd), `should flag: ${cmd}`);
+    }
+    for (const cmd of ["npm run build", "ls -la", "pytest", "git status", "vite build", "npm test"]) {
+      assert.ok(!looksLongRunning(cmd), `should NOT flag: ${cmd}`);
+    }
+  });
+
+  await test("a server command is backgrounded instead of blocking the agent", async () => {
+    const started = Date.now();
+    const result = await bashTool.run({ command: "python3 -m http.server 8911" });
+    const elapsed = Date.now() - started;
+    assert.equal(result.ok, true);
+    assert.match(result.output, /background/i, "must say it was backgrounded");
+    assert.ok(elapsed < 5_000, `must return immediately, took ${elapsed}ms`);
+
+    const id = String(result.output.match(/"(bg_[a-z0-9]+)"/)?.[1]);
+    assert.ok(id.startsWith("bg_"), "returns a handle to read later");
+
+    // It should actually be serving.
+    await new Promise((r) => setTimeout(r, 1500));
+    const alive = await fetch("http://localhost:8911").then((r) => r.ok).catch(() => false);
+    assert.ok(alive, "the backgrounded server should really be running");
+
+    const logs = await checkOutputTool.run({ id });
+    assert.match(logs.output, /running/);
+
+    // And killing it must take down the whole tree, not just the shell.
+    await killProcessTool.run({ id });
+    await new Promise((r) => setTimeout(r, 1500));
+    const stillAlive = await fetch("http://localhost:8911").then((r) => r.ok).catch(() => false);
+    assert.equal(stillAlive, false, "killing must stop the server, leaving no orphan holding the port");
+  });
+
+  await test("check_output lists processes and rejects unknown ids", async () => {
+    const list = await checkOutputTool.run({});
+    assert.ok(typeof list.output === "string");
+    const bad = await checkOutputTool.run({ id: "bg_nope" });
+    assert.equal(bad.ok, false);
+    assert.match(bad.output, /No background process/);
   });
 
   console.log("Agent loop (against a fake driver, no real browser):");
