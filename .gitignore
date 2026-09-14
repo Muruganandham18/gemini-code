@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.gemini-code-profile/
+.gemini-code-tmp/
+.tmp-test/
+*.log
+
+# Runtime state this tool generates in whatever project it runs in.
+# Ignored HERE because they're just artifacts of testing the tool on itself.
+# In your own project, GEMINI.md is worth committing (it's durable knowledge
+# your team shares); GEMINI-PLAN.md is transient and usually isn't.
+GEMINI.md
+GEMINI-PLAN.md
