@@ -175,6 +175,7 @@ Semantic versioning, reported by `gemini-code --version`.
 
 | Version | Highlights |
 | --- | --- |
+| **0.2.1** | fixes confirmation prompts double-echoing and leaking answers into the task queue; cross-platform build fix |
 | **0.2.0** | interactive browsing, image input, file-editing tools, parallel workers, orchestrator mode, plan journal, `/undo`, cross-platform installers |
 | **0.1.0** | first working agent loop: prompted tool calls, read/write/bash, context and memory |
 
