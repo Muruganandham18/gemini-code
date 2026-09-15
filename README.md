@@ -41,22 +41,142 @@ The version is 0.1.0.
 - **Expect selector drift.** It depends on Gemini's DOM. When Google redesigns,
   [`src/driver/selectors.ts`](src/driver/selectors.ts) is the one file to fix.
 
-## Requirements
-
-- macOS, Linux or Windows
-- Node.js 20+
-- Google Chrome installed
-- A Gemini account you can sign into
-
 ## Install
 
+**One command. Nothing to clone, nothing to build.**
+
+macOS / Linux:
+
 ```bash
-git clone <this-repo>
+curl -fsSL https://raw.githubusercontent.com/Muruganandham18/gemini-code/main/install.sh | bash
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/Muruganandham18/gemini-code/main/install.ps1 | iex
+```
+
+The installer checks your Node and Chrome, fetches the latest release (or builds
+from source if none is published yet), installs to `~/.gemini-code/app`, and puts
+`gemini-code` on your PATH. No sudo, no admin rights.
+
+> Two files rather than one because `curl | bash` and `irm | iex` are different
+> shells that can't read the same script — Claude Code splits them the same way.
+
+Then just run it in any project:
+
+```bash
+cd ~/code/my-project
+gemini-code
+```
+
+### Requirements
+
+| Requirement | Why | Check |
+| --- | --- | --- |
+| **macOS, Linux or Windows** | Chrome launching and clipboard paste are implemented per platform | — |
+| **Node.js 20+** | ES modules, built-in `fetch` | `node -v` |
+| **Google Chrome** | the agent drives a real Chrome | — |
+| **A Gemini account** | you sign in once, by hand | — |
+
+On an older Node, [nvm](https://github.com/nvm-sh/nvm) is the quickest fix:
+`nvm install 20 && nvm use 20`.
+
+> **No browser download.** Unlike most Playwright projects, this needs no
+> `npx playwright install` — it drives the Chrome you already have, and the test
+> suites do too. A clean install is ~55 MB.
+
+### Other ways to install
+
+```bash
+npm install -g gemini-code          # from npm
+```
+
+From source, for hacking on it:
+
+```bash
+git clone https://github.com/Muruganandham18/gemini-code.git
 cd gemini-code
 npm install
 npm run build
-npm link          # puts `gemini-code` on your PATH
+npm link            # symlinks the CLI to your checkout
 ```
+
+`npm link` points at your checkout, so `git pull && npm run build` updates it in
+place.
+
+### Updating
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Muruganandham18/gemini-code/main/install.sh | bash
+```
+
+Re-running the installer replaces the installed copy.
+
+### Uninstalling
+
+```bash
+rm -f ~/.local/bin/gemini-code   # the launcher (installer route)
+npm unlink -g gemini-code        # if you installed from source
+rm -rf ~/.gemini-code            # app + Chrome profile (this signs you out)
+```
+
+On Windows: delete `%USERPROFILE%\.gemini-code` and remove its `bin` folder from
+your PATH.
+
+### Where things live
+
+| Path | What | Commit it? |
+| --- | --- | --- |
+| `~/.gemini-code/app` | the installed program | n/a |
+| `~/.gemini-code/profile` | Chrome profile — **holds a live Google session** | **never** |
+| `<project>/GEMINI.md` | durable project memory | yes, if useful |
+| `<project>/GEMINI-PLAN.md` | in-flight task journal | usually not |
+| `<project>/.gemini-code-tmp/` | attachments, screenshots, undo snapshots | no |
+
+Add to the `.gitignore` of any project you run it in:
+
+```gitignore
+.gemini-code-tmp/
+GEMINI-PLAN.md
+```
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+| --- | --- |
+| `command not found: gemini-code` | `~/.local/bin` isn't on your PATH — the installer prints the line to add |
+| `Couldn't attach to Chrome on port 9222` | Chrome isn't up: `gemini-code open-chrome`, sign in, retry |
+| `Your Gemini session is signed out` | Session expired: `gemini-code login` and sign in |
+| "this browser or app may not be secure" | You tried signing in inside an automated browser — use `gemini-code open-chrome`, which opens a normal one |
+| Nothing sends / `no new response ever appeared` | Gemini's markup changed; recalibrate [`src/driver/selectors.ts`](src/driver/selectors.ts) |
+| Replies but takes no action | Protocol drift in a long thread — `/clear` starts a fresh one |
+
+### Why there's no single-file binary
+
+Tried it; it doesn't hold up. Playwright reads its own files at runtime — its
+`package.json`, the browser registry, `launchApp` — so bundling it into one
+executable fails with a different `MODULE_NOT_FOUND` each time you patch the last
+one. A binary built that way would break in ways users couldn't diagnose, and again
+on every Playwright upgrade.
+
+The installer and the release tarball (`npm run package`, ~4 MB) are the honest
+version of the same idea: one command, no build. They need Node on the machine,
+which is a small ask next to Chrome, which is needed anyway.
+
+## Versioning
+
+Semantic versioning, reported by `gemini-code --version`.
+
+| Version | Highlights |
+| --- | --- |
+| **0.2.0** | interactive browsing, image input, file-editing tools, parallel workers, orchestrator mode, plan journal, `/undo`, cross-platform installers |
+| **0.1.0** | first working agent loop: prompted tool calls, read/write/bash, context and memory |
+
+Because this drives a UI nobody versions for us, **patch releases are mostly
+selector repairs**. If it suddenly stops sending or reading replies, update before
+debugging.
 
 ## Use
 
