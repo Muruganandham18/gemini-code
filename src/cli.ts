@@ -35,6 +35,7 @@ export const VERSION = "0.2.0";
 import { openChrome, ensureChromeRunning } from "./scripts/openChrome.js";
 import { checkLogin } from "./scripts/login.js";
 import { c } from "./ui/format.js";
+import { setAsker } from "./ui/prompt.js";
 
 function helpText(): string {
   return `${c.bold("Commands")}
@@ -195,8 +196,19 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
   const queued: string[] = [];
   let pending: ((line: string | null) => void) | null = null;
   let inputDone = false;
+  /** Set while a confirmation prompt is waiting for an answer. */
+  let awaitingAnswer: ((line: string) => void) | null = null;
 
   rl.on("line", (line) => {
+    // A confirmation has first claim on the line. Without this the answer
+    // would ALSO be queued and later sent to Gemini as a task — typing "y"
+    // to approve a write would become a message saying "y".
+    if (awaitingAnswer) {
+      const answer = awaitingAnswer;
+      awaitingAnswer = null;
+      answer(line);
+      return;
+    }
     if (pending) {
       const resolve = pending;
       pending = null;
@@ -204,6 +216,15 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
     } else {
       queued.push(line);
     }
+  });
+
+  // Confirmation prompts borrow this readline rather than opening their own,
+  // which would double-echo every keystroke and race for the same input.
+  setAsker((question) => {
+    process.stdout.write(question);
+    return new Promise<string>((resolve) => {
+      awaitingAnswer = resolve;
+    });
   });
   rl.on("close", () => {
     inputDone = true;
@@ -423,6 +444,7 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
       }
     }
   } finally {
+    setAsker(undefined);
     rl.close();
     killAllBackgroundProcesses();
     await driver.close();

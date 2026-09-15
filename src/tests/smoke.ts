@@ -27,6 +27,8 @@ import { ensureMemoryFile, appendMemory, readMemory, MEMORY_FILENAME } from "../
 import { collectProjectDocs } from "../context/projectDocs.js";
 import { isImagePath, normalizeDroppedPath } from "../context/clipboard.js";
 import { CheckpointStore } from "../context/checkpoint.js";
+import { confirmAction } from "../tools/confirm.js";
+import { setAsker } from "../ui/prompt.js";
 import { PlanJournal, readPlan, findResumablePlan, clearPlan } from "../context/plan.js";
 import { runParallelTasks, createDelegateTool, MAX_WORKER_REPORT_CHARS } from "../agent/workers.js";
 
@@ -249,6 +251,58 @@ async function main() {
     const bad = await checkOutputTool.run({ id: "bg_nope" });
     assert.equal(bad.ok, false);
     assert.match(bad.output, /No background process/);
+  });
+
+  console.log("Confirmation prompts:");
+  await test("asks through the REPL's reader, not a second one on stdin", async () => {
+    // Two readlines on one stdin echo every keystroke twice ("yy") and both
+    // receive the line, so the answer also reached the REPL and was sent to
+    // Gemini as a task. Confirmations must go through the registered asker.
+    delete process.env.GEMINI_CODE_AUTO_APPROVE;
+    const asked: string[] = [];
+    setAsker(async (question) => {
+      asked.push(question);
+      return "y";
+    });
+    try {
+      const approved = await confirmAction("Do the thing?", "details here");
+      assert.equal(approved, true);
+      assert.equal(asked.length, 1, "must ask exactly once, through the owner");
+      assert.match(asked[0], /Do the thing\?/);
+      assert.match(asked[0], /\(y\/N\)/);
+    } finally {
+      setAsker(undefined);
+      process.env.GEMINI_CODE_AUTO_APPROVE = "1";
+    }
+  });
+
+  await test("treats anything other than y as a refusal", async () => {
+    delete process.env.GEMINI_CODE_AUTO_APPROVE;
+    try {
+      for (const reply of ["n", "", "no", "yes please", "Y "]) {
+        setAsker(async () => reply);
+        const approved = await confirmAction("Run?", "rm -rf /");
+        assert.equal(approved, reply.trim().toLowerCase() === "y", `reply ${JSON.stringify(reply)}`);
+      }
+    } finally {
+      setAsker(undefined);
+      process.env.GEMINI_CODE_AUTO_APPROVE = "1";
+    }
+  });
+
+  await test("auto-approve skips the prompt entirely", async () => {
+    let askedAnything = false;
+    setAsker(async () => {
+      askedAnything = true;
+      return "n";
+    });
+    try {
+      process.env.GEMINI_CODE_AUTO_APPROVE = "1";
+      assert.equal(await confirmAction("Run?", "ls"), true);
+      assert.equal(askedAnything, false, "must not prompt when auto-approving");
+    } finally {
+      setAsker(undefined);
+    }
   });
 
   console.log("Checkpoints (/undo):");

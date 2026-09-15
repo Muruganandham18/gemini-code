@@ -1,10 +1,10 @@
 import readline from "node:readline/promises";
+import { getAsker } from "../ui/prompt.js";
 
 /**
  * Serializes prompts. With parallel worker tabs, several tools can want
- * confirmation at the same moment — without this they'd each attach a
- * readline to stdin simultaneously, interleave their questions, and steal
- * each other's keystrokes. Queueing means you answer one at a time.
+ * confirmation at the same moment — without this they'd interleave their
+ * questions and steal each other's keystrokes.
  */
 let queue: Promise<unknown> = Promise.resolve();
 
@@ -26,9 +26,21 @@ export async function confirmAction(promptLabel: string, detail: string): Promis
 }
 
 async function ask(promptLabel: string, detail: string): Promise<boolean> {
+  const question = `\n[gemini-code] ${promptLabel}\n  ${detail}\n  (y/N) `;
+
+  // Prefer the REPL's own readline. Opening a second interface on the same
+  // stdin makes the terminal echo each keystroke twice AND delivers the
+  // answer to the REPL as well, where "y" gets sent to Gemini as a task.
+  const asker = getAsker();
+  if (asker) {
+    const answer = await asker(question);
+    return answer.trim().toLowerCase() === "y";
+  }
+
+  // Standalone use (scripts, tests): nobody owns stdin, so make our own.
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const answer = await rl.question(`\n[gemini-code] ${promptLabel}\n  ${detail}\n  (y/N) `);
+    const answer = await rl.question(question);
     return answer.trim().toLowerCase() === "y";
   } finally {
     rl.close();
