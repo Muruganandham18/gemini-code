@@ -11,3 +11,4 @@ dist/
 # your team shares); GEMINI-PLAN.md is transient and usually isn't.
 GEMINI.md
 GEMINI-PLAN.md
+.release/
