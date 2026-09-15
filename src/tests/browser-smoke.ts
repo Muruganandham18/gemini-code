@@ -74,7 +74,10 @@ async function testInteractiveBrowsing(): Promise<void> {
   });
   await new Promise<void>((r) => server.listen(8934, r));
 
-  const browser = await chromium.launch({ headless: true });
+  // channel: "chrome" uses the Chrome already on the machine, so running
+  // the tests needs no `npx playwright install` download — and exercises
+  // the same browser real users run.
+  const browser = await chromium.launch({ headless: true, channel: "chrome" });
   const context = await browser.newContext();
   const session = new BrowserSession(context);
 
