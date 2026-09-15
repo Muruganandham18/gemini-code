@@ -175,6 +175,7 @@ Semantic versioning, reported by `gemini-code --version`.
 
 | Version | Highlights |
 | --- | --- |
+| **0.4.0** | command output saved to searchable logs; errors surfaced from anywhere in a long build |
 | **0.3.1** | stops the loop ending on a progress report; continuation nudging from the plan |
 | **0.3.0** | `web_search`, verified interactive browsing (click / back / type+submit / JS buttons) |
 | **0.2.1** | fixes confirmation prompts double-echoing and leaking answers into the task queue; cross-platform build fix |
@@ -357,6 +358,24 @@ the agent until a timeout, then kill the server anyway. Those are detected and
 ⏺ kill_process(id: bg_mu1kcjgg)
   ⎿ Stopped "bg_mu1kcjgg" and its children.
 ```
+
+**Every command's output is saved to a log**, foreground ones included, and the
+result reports its id. That matters for builds: a failing `npm run build` can emit
+thousands of lines with the error in the *middle*, so returning a tail throws away
+the part that explains the failure. On a non-zero exit the error lines are pulled
+out and shown wherever they appear:
+
+```
+Exit code 1
+Error lines found in the output:
+  line 1501: ERROR in src/components/Customer.vue:42  Cannot find name 'defineProps'
+
+[3003 lines total, saved as "fg_mu2y6diu" — search it with
+ check_output {"id": "fg_mu2y6diu", "grep": "error"} rather than re-running]
+```
+
+`check_output` then greps that log with surrounding context, so the agent finds
+the cause without paging through the whole thing or re-running the build.
 
 Set `background: true` explicitly for anything else that doesn't return.
 Everything is spawned in its own **process group**, so killing takes the whole tree
