@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { openSync, closeSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { openSync, closeSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import type { ToolDefinition } from "../types.js";
 import { confirmAction } from "./confirm.js";
@@ -15,10 +15,41 @@ export interface BackgroundProcess {
   logPath: string;
   startedAt: number;
   exitCode: number | null;
+  background: boolean;
 }
 
-/** Everything we've launched in the background, so it can be read and cleaned up. */
+/**
+ * Every command we've run, background or not, keyed by id.
+ *
+ * Foreground commands are logged too. A failing build can emit thousands of
+ * lines with the actual error in the middle, so returning a tail throws away
+ * the part that mattered — keeping the full log on disk means it can be
+ * searched afterwards instead of re-run.
+ */
 export const backgroundProcesses = new Map<string, BackgroundProcess>();
+
+/** Lines worth surfacing from a failed command, wherever they appear in it. */
+const ERROR_LINE = /\b(error|ERR!|failed|failure|exception|cannot find|not found|undefined reference|panic|traceback|fatal|refused)\b|^\s*✗|^\s*×/i;
+
+function summarizeLog(content: string, exitCode: number | null, tailLines = 25): string {
+  const lines = content.split("\n");
+  const tail = lines.slice(-tailLines).join("\n").trim();
+
+  // On failure, hunt out the error lines wherever they are — a 3000-line
+  // build usually fails somewhere in the middle, and the tail is just the
+  // summary footer.
+  if (exitCode !== 0 && lines.length > tailLines) {
+    const errors = lines
+      .map((l, i) => [i + 1, l] as const)
+      .filter(([, l]) => ERROR_LINE.test(l))
+      .slice(0, 30)
+      .map(([n, l]) => `  line ${n}: ${l.trim().slice(0, 200)}`);
+    if (errors.length) {
+      return `Error lines found in the output:\n${errors.join("\n")}\n\nLast ${tailLines} lines:\n${tail}`;
+    }
+  }
+  return tail;
+}
 
 /**
  * Commands that never return on their own.
@@ -86,6 +117,9 @@ function killGroup(pid: number): void {
 }
 
 function runForeground(command: string): Promise<{ ok: boolean; output: string }> {
+  const id = `fg_${Date.now().toString(36)}`;
+  const logPath = path.join(tmpDir(), `${id}.log`);
+
   return new Promise((resolve) => {
     // Intentionally shell-based: the point of this tool is running real
     // command lines, pipes and redirects included, exactly like Claude
@@ -109,6 +143,34 @@ function runForeground(command: string): Promise<{ ok: boolean; output: string }
 
     child.on("close", (code) => {
       clearTimeout(timer);
+
+      // Always keep the full output, however long — the model can search it
+      // with check_output instead of losing the middle of a big build.
+      try {
+        writeFileSync(logPath, out, "utf8");
+        backgroundProcesses.set(id, {
+          id,
+          command,
+          pid: child.pid ?? -1,
+          logPath,
+          startedAt: Date.now(),
+          exitCode: code,
+          background: false,
+        });
+      } catch {
+        /* logging must never fail the command it's logging */
+      }
+
+      const lineCount = out.split("\n").length;
+      const big = out.length > MAX_OUTPUT_CHARS || lineCount > 60;
+      // The id is always reported, not just for huge output: any command's
+      // log may be worth grepping later, and re-running it to look again is
+      // slower and can have side effects.
+      const pointer = big
+        ? `\n\n[${lineCount} lines total, saved as "${id}" — search it with ` +
+          `check_output {"id": "${id}", "grep": "error"} rather than re-running]`
+        : `\n[saved as "${id}"]`;
+
       if (killed) {
         resolve({
           ok: false,
@@ -116,12 +178,15 @@ function runForeground(command: string): Promise<{ ok: boolean; output: string }
             `Command timed out after ${FOREGROUND_TIMEOUT_MS / 1000}s and was killed.\n` +
             `If this is a server or watcher that doesn't exit on its own, re-run it with ` +
             `"background": true — then use check_output to read its logs.\n\n` +
-            `Partial output:\n${tail(out)}`,
+            `Partial output:\n${summarizeLog(out, 1)}${pointer}`,
         });
       } else {
         resolve({
           ok: code === 0,
-          output: (code === 0 ? "" : `Exit code ${code}\n`) + (tail(out) || "(no output)"),
+          output:
+            (code === 0 ? "" : `Exit code ${code}\n`) +
+            (summarizeLog(out, code) || "(no output)") +
+            pointer,
         });
       }
     });
@@ -151,6 +216,7 @@ function runBackground(command: string): { ok: boolean; output: string } {
     logPath,
     startedAt: Date.now(),
     exitCode: null,
+    background: true,
   };
   backgroundProcesses.set(id, record);
   child.on("exit", (code) => {
@@ -204,20 +270,24 @@ export const bashTool: ToolDefinition = {
 export const checkOutputTool: ToolDefinition = {
   name: "check_output",
   description:
-    `check_output(args: {id?: string, lines?: number}) -> reads recent output from a background process ` +
-    `started by run_bash. Omit 'id' to list everything currently running. Use this to see whether a dev ` +
-    `server actually came up, or what a build is doing.`,
+    `check_output(args: {id?: string, grep?: string, context?: number, lines?: number, head?: boolean}) -> reads the ` +
+    `saved output of a command run by run_bash — background OR finished foreground ones. Omit 'id' to list what's ` +
+    `available. 'grep' is a regular expression: use it to find the actual error in a long build instead of paging ` +
+    `through it ("error", "FAIL", "cannot find"), with 'context' lines either side. 'lines' limits how much comes ` +
+    `back (tail by default, or the start with head: true). Prefer grep over dumping a whole log.`,
   async run(args) {
     const id = args.id ? String(args.id) : undefined;
 
     if (!id) {
-      if (backgroundProcesses.size === 0) return { ok: true, output: "No background processes." };
+      if (backgroundProcesses.size === 0) return { ok: true, output: "No command output saved yet." };
       const list = [...backgroundProcesses.values()]
-        .map(
-          (p) =>
-            `- ${p.id} (pid ${p.pid}, ${Math.round((Date.now() - p.startedAt) / 1000)}s, ` +
-            `${p.exitCode === null ? "running" : `exited ${p.exitCode}`}): ${p.command}`
-        )
+        .map((p) => {
+          const state =
+            p.exitCode === null
+              ? `running ${Math.round((Date.now() - p.startedAt) / 1000)}s`
+              : `exited ${p.exitCode}`;
+          return `- ${p.id} (${p.background ? "background" : "foreground"}, ${state}): ${p.command}`;
+        })
         .join("\n");
       return { ok: true, output: list };
     }
@@ -226,7 +296,7 @@ export const checkOutputTool: ToolDefinition = {
     if (!proc) {
       return {
         ok: false,
-        output: `No background process "${id}". Known: ${[...backgroundProcesses.keys()].join(", ") || "(none)"}`,
+        output: `No saved output for "${id}". Known: ${[...backgroundProcesses.keys()].join(", ") || "(none)"}`,
       };
     }
 
@@ -236,15 +306,64 @@ export const checkOutputTool: ToolDefinition = {
     } catch {
       content = "";
     }
-    const lines = Number(args.lines);
-    if (Number.isFinite(lines) && lines > 0) {
-      content = content.split("\n").slice(-lines).join("\n");
-    }
+
     const status = proc.exitCode === null ? "running" : `exited with code ${proc.exitCode}`;
-    return {
-      ok: true,
-      output: `${proc.id} (${status}): ${proc.command}\n\n${tail(content) || "(no output yet)"}`,
-    };
+    const header = `${proc.id} (${status}): ${proc.command}`;
+    const allLines = content.split("\n");
+
+    // Searching beats paging: a failing build is thousands of lines and the
+    // model only needs the handful that explain why.
+    if (args.grep) {
+      let re: RegExp;
+      try {
+        re = new RegExp(String(args.grep), "i");
+      } catch (err) {
+        return { ok: false, output: `Invalid 'grep' regular expression: ${(err as Error).message}` };
+      }
+      const ctx = Math.min(Math.max(Number(args.context) || 0, 0), 10);
+      const hits: string[] = [];
+      let shown = 0;
+      for (let i = 0; i < allLines.length && shown < 100; i++) {
+        if (!re.test(allLines[i])) continue;
+        shown++;
+        const from = Math.max(0, i - ctx);
+        const to = Math.min(allLines.length - 1, i + ctx);
+        const block = allLines
+          .slice(from, to + 1)
+          .map((l, j) => `${String(from + j + 1).padStart(6)}${from + j === i ? " >" : "  "} ${l}`)
+          .join("\n");
+        hits.push(block);
+      }
+      if (hits.length === 0) {
+        return {
+          ok: true,
+          output: `${header}\n\nNo lines matching /${args.grep}/ in ${allLines.length} lines of output.`,
+        };
+      }
+      return {
+        ok: true,
+        output:
+          `${header}\n\n${shown} matching line(s) for /${args.grep}/ ` +
+          `(of ${allLines.length} total):\n\n${hits.join("\n  --\n")}`,
+      };
+    }
+
+    const limit = Number(args.lines);
+    let slice = content;
+    if (Number.isFinite(limit) && limit > 0) {
+      slice = args.head
+        ? allLines.slice(0, limit).join("\n")
+        : allLines.slice(-limit).join("\n");
+    }
+
+    const truncated = slice.length > MAX_OUTPUT_CHARS;
+    const body = truncated ? tail(slice) : slice;
+    const hint =
+      allLines.length > 200
+        ? `\n\n[${allLines.length} lines total — narrow it with grep, e.g. {"id": "${id}", "grep": "error", "context": 2}]`
+        : "";
+
+    return { ok: true, output: `${header}\n\n${body || "(no output yet)"}${hint}` };
   },
 };
 

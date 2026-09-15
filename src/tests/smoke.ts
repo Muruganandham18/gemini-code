@@ -247,12 +247,47 @@ async function main() {
     assert.equal(stillAlive, false, "killing must stop the server, leaving no orphan holding the port");
   });
 
+  await test("surfaces the error from the MIDDLE of a huge failing build", async () => {
+    // The case tail-only output loses: 3000 lines with the failure buried
+    // in the middle, so the last 25 lines explain nothing.
+    const cmd = `node -e "for(let i=1;i<=600;i++)console.log('compiling mod-'+i);` +
+      `console.error('ERROR: Cannot find name BuriedSymbol');` +
+      `for(let i=601;i<=1200;i++)console.log('compiling mod-'+i);process.exit(1)"`;
+    const r = await bashTool.run({ command: cmd });
+    assert.equal(r.ok, false);
+    assert.match(r.output, /BuriedSymbol/, "the real error must be surfaced, not just the tail");
+    assert.match(r.output, /Error lines found/);
+    assert.match(r.output, /saved as "fg_/, "should point at the saved log");
+  });
+
+  await test("check_output greps a saved log with context", async () => {
+    const cmd = `node -e "for(let i=1;i<=300;i++)console.log('line '+i);console.log('NEEDLE here');process.exit(0)"`;
+    const r = await bashTool.run({ command: cmd });
+    const useId = String(r.output.match(/"(fg_[a-z0-9]+)"/)?.[1] ?? "");
+    assert.ok(useId, "every run should report the id of its saved log");
+
+    const listed = await checkOutputTool.run({});
+    assert.match(listed.output, /foreground/, "finished foreground commands are listed too");
+
+    const g = await checkOutputTool.run({ id: useId, grep: "NEEDLE", context: 1 });
+    assert.equal(g.ok, true, g.output);
+    assert.match(g.output, /NEEDLE here/);
+    assert.match(g.output, /matching line/);
+
+    const none = await checkOutputTool.run({ id: useId, grep: "zzz-not-present-zzz" });
+    assert.match(none.output, /No lines matching/);
+
+    const bad = await checkOutputTool.run({ id: useId, grep: "([unclosed" });
+    assert.equal(bad.ok, false);
+    assert.match(bad.output, /Invalid 'grep'/);
+  });
+
   await test("check_output lists processes and rejects unknown ids", async () => {
     const list = await checkOutputTool.run({});
     assert.ok(typeof list.output === "string");
     const bad = await checkOutputTool.run({ id: "bg_nope" });
     assert.equal(bad.ok, false);
-    assert.match(bad.output, /No background process/);
+    assert.match(bad.output, /No saved output/);
   });
 
   console.log("Stopping early (progress reports treated as final):");
