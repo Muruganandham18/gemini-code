@@ -21,6 +21,7 @@ import { gitStatusTool, gitDiffTool } from "../tools/git.js";
 import { writeFileTool } from "../tools/writeFile.js";
 import { bashTool, checkOutputTool, killProcessTool, looksLongRunning } from "../tools/bash.js";
 import { fetchUrlTool } from "../tools/fetchUrl.js";
+import { webSearchTool, parseResults } from "../tools/webSearch.js";
 import { resolveModel, DEFAULT_MODEL_ALIAS, EXTENDED_THINKING } from "../driver/models.js";
 import { buildProjectTree } from "../context/projectTree.js";
 import { ensureMemoryFile, appendMemory, readMemory, MEMORY_FILENAME } from "../context/memory.js";
@@ -251,6 +252,27 @@ async function main() {
     const bad = await checkOutputTool.run({ id: "bg_nope" });
     assert.equal(bad.ok, false);
     assert.match(bad.output, /No background process/);
+  });
+
+  console.log("Web search:");
+  await test("parses results out of the search HTML", () => {
+    const html = `
+      <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fpypi.org%2Fproject%2Ffastapi%2F&amp;rut=x">fastapi &middot; PyPI</a>
+      <a class="result__snippet" href="#">FastAPI is a modern, <b>fast</b> web framework.</a>
+      <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Ffastapi.tiangolo.com%2F">FastAPI docs</a>`;
+    const results = parseResults(html, 5);
+    assert.equal(results.length, 2);
+    // The redirect wrapper must be unwrapped to the real destination.
+    assert.equal(results[0].url, "https://pypi.org/project/fastapi/");
+    assert.match(results[0].title, /fastapi/i);
+    assert.match(results[0].snippet, /modern, fast web framework/);
+    assert.equal(results[1].url, "https://fastapi.tiangolo.com/");
+  });
+
+  await test("web_search requires a query", async () => {
+    const r = await webSearchTool.run({});
+    assert.equal(r.ok, false);
+    assert.match(r.output, /'query' is required/);
   });
 
   console.log("Confirmation prompts:");

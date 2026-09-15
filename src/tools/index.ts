@@ -8,6 +8,7 @@ import { bashTool, checkOutputTool, killProcessTool } from "./bash.js";
 import { listFilesTool } from "./listFiles.js";
 import { rememberTool } from "./remember.js";
 import { fetchUrlTool } from "./fetchUrl.js";
+import { webSearchTool } from "./webSearch.js";
 
 export const tools: ToolDefinition[] = [
   readFileTool,
@@ -22,6 +23,7 @@ export const tools: ToolDefinition[] = [
   listFilesTool,
   rememberTool,
   fetchUrlTool,
+  webSearchTool,
 ];
 
 export const toolsByName: Record<string, ToolDefinition> = Object.fromEntries(
