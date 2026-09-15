@@ -11,13 +11,16 @@
     "login": "tsx src/scripts/login.ts",
     "dev": "tsx src/cli.ts",
     "build": "tsc -p . && chmod +x dist/cli.js",
-    "start": "node dist/cli.js"
+    "start": "node dist/cli.js",
+    "package": "bash scripts/package-release.sh",
+    "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
     "playwright": "^1.47.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
+    "esbuild": "^0.28.2",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0"
   },
@@ -39,5 +42,13 @@
     "coding-agent",
     "playwright",
     "llm"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Muruganandham18/gemini-code.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Muruganandham18/gemini-code/issues"
+  },
+  "homepage": "https://github.com/Muruganandham18/gemini-code#readme"
 }
