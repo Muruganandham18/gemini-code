@@ -175,6 +175,7 @@ Semantic versioning, reported by `gemini-code --version`.
 
 | Version | Highlights |
 | --- | --- |
+| **0.3.1** | stops the loop ending on a progress report; continuation nudging from the plan |
 | **0.3.0** | `web_search`, verified interactive browsing (click / back / type+submit / JS buttons) |
 | **0.2.1** | fixes confirmation prompts double-echoing and leaking answers into the task queue; cross-platform build fix |
 | **0.2.0** | interactive browsing, image input, file-editing tools, parallel workers, orchestrator mode, plan journal, `/undo`, cross-platform installers |
@@ -325,7 +326,16 @@ the web UI truncates without telling anyone, and Gemini reverts to chatting —
 tool call. To a parser that's indistinguishable from a finished answer, so the task
 would end having done nothing, which looks like the app ignoring the reply.
 
-Two mitigations: the tool-call contract is **restated every few turns**
+A second failure looks similar but isn't drift: the model follows the protocol
+correctly and simply **stops early**, answering with a progress report — *"the
+migration is underway…"* — which has no tool call, so the loop treats it as
+finished and the work ends half-done. Two signals catch it: **plan steps it
+recorded but never ticked off** (the strongest evidence), and language describing
+work still in flight. Either pushes it to carry on
+(`GEMINI_CODE_CONTINUE_NUDGES`, default 3). Completion wording still ends the
+task normally.
+
+For drift proper, the tool-call contract is **restated every few turns**
 (`GEMINI_CODE_REMINDER_TURNS`), and a reply that pasted code while *announcing* an
 action gets **nudged back** to the protocol (`GEMINI_CODE_DRIFT_NUDGES`, default 2)
 rather than accepted. The nudges are capped so a genuine answer that happens to

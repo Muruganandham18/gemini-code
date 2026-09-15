@@ -11,7 +11,7 @@ import {
   type PrimerContext,
   type AgentRole,
 } from "./promptTemplate.js";
-import { parseGeminiReply, looksLikeAbandonedWork } from "./toolCallParser.js";
+import { parseGeminiReply, looksLikeAbandonedWork, looksUnfinished } from "./toolCallParser.js";
 import { toolCallLine, toolResultLine, noteLine } from "../ui/format.js";
 import type { PlanJournal } from "../context/plan.js";
 
@@ -42,6 +42,13 @@ const TMP_DIR = ".gemini-code-tmp";
  */
 const REMINDER_EVERY_TURNS = Math.max(0, Number(process.env.GEMINI_CODE_REMINDER_TURNS ?? 5));
 const MAX_DRIFT_NUDGES = Math.max(0, Number(process.env.GEMINI_CODE_DRIFT_NUDGES ?? 2));
+
+/**
+ * How many times a "final" answer that clearly isn't final gets pushed to
+ * carry on. Separate from drift nudges because this is a different failure:
+ * the model is following the protocol correctly, it has just stopped early.
+ */
+const MAX_CONTINUE_NUDGES = Math.max(0, Number(process.env.GEMINI_CODE_CONTINUE_NUDGES ?? 3));
 
 /** Transient driver failures (send/response) are retried this many times. */
 const TURN_RETRIES = Math.max(0, Number(process.env.GEMINI_CODE_TURN_RETRIES ?? 2));
@@ -93,6 +100,7 @@ export class AgentSession {
     let message = userTask;
     let attachFile: string[] = [...(options.attachments ?? [])];
     let driftNudges = 0;
+    let continueNudges = 0;
 
     if (!this.primed) {
       this.primed = true;
@@ -150,6 +158,31 @@ export class AgentSession {
           log(noteLine(`reply had code but no tool call — restating the protocol (${driftNudges}/${MAX_DRIFT_NUDGES})`));
           await this.journal?.log("protocol drift: reminded Gemini to use tools");
           message = buildProtocolReminder();
+          continue;
+        }
+
+        // The model stopped and reported progress instead of finishing.
+        // Two signals, strongest first: steps it recorded but never ticked
+        // off, then language describing work still in flight ("is
+        // underway", "next steps"). Either way, push it to carry on rather
+        // than ending the task half-done.
+        const pending = this.journal?.pendingSteps() ?? [];
+        const stoppedEarly = pending.length > 0 || looksUnfinished(reply);
+        if (continueNudges < MAX_CONTINUE_NUDGES && stoppedEarly) {
+          continueNudges++;
+          const why = pending.length
+            ? `${pending.length} plan step(s) still open`
+            : "the reply describes work still in progress";
+          log(noteLine(`not finished — ${why}; continuing (${continueNudges}/${MAX_CONTINUE_NUDGES})`));
+          await this.journal?.log(`continue nudge: ${why}`);
+          message =
+            `That was a progress report, not a finished task — do not stop here.\n` +
+            (pending.length
+              ? `These plan steps are still open:\n${pending.map((p) => `- ${p}`).join("\n")}\n\n`
+              : "") +
+            `Carry on now with the next action. Reply with a tool call (a code block containing ` +
+            `{"name": ..., "args": ...}) and keep going until every step is actually done. ` +
+            `Only answer in plain prose when the work is genuinely complete — and say so explicitly.`;
           continue;
         }
         await this.journal?.complete(parsed.text);

@@ -64,6 +64,18 @@ export class PlanJournal {
     await this.flush();
   }
 
+  /**
+   * Steps the model recorded but hasn't ticked off.
+   *
+   * The strongest available signal that a "final" answer isn't actually
+   * final: if the agent wrote itself a six-step plan and answers after
+   * three, the work is demonstrably unfinished regardless of how confident
+   * the prose sounds.
+   */
+  pendingSteps(): string[] {
+    return (this.state?.steps ?? []).filter((s) => !s.done).map((s) => s.title);
+  }
+
   async complete(summary: string): Promise<void> {
     if (!this.state) return;
     this.state.status = "completed";

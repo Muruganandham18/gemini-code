@@ -100,3 +100,32 @@ export function looksLikeAbandonedWork(response: GeminiResponse): boolean {
     response.text
   );
 }
+
+/**
+ * Detects a PROGRESS REPORT masquerading as a final answer.
+ *
+ * Seen in a real migration: after a tool result, Gemini replied
+ * "The migration of ClientApp to Vue 3 is underway. 1. Package
+ * Architecture — Dependencies Updated…" with no code block and no tool
+ * call. Nothing in the reply is wrong; it simply isn't finished. The
+ * parser had no way to tell that from a completed answer, so the loop
+ * ended mid-migration.
+ *
+ * Keyed on language that describes work still in flight. Deliberately does
+ * NOT fire on completion words ("completed", "done", "finished"), so a
+ * genuine summary of what was accomplished still ends the task.
+ */
+export function looksUnfinished(response: GeminiResponse): boolean {
+  const text = response.text;
+  if (!text.trim()) return false;
+
+  // An explicit statement of completion wins — it's the model's clearest
+  // signal that it considers the work done.
+  if (/\b(is|are|has been|have been) (now )?(complete|completed|finished|done)\b|\ball (steps|tasks|files) (are )?(complete|done)\b|\bsuccessfully (completed|finished|implemented)\b/i.test(text)) {
+    return false;
+  }
+
+  return /\b(is|are) (currently )?(underway|in progress|ongoing)\b|\bnext steps?\b|\bi('| a)?m going to (now )?\b|\bi will (now |next )?(continue|proceed|start|begin|update|create|modify)\b|\b(remaining|still (need|to do|pending))\b|\blet me (now )?(continue|proceed)\b|\bso far[,:]/i.test(
+    text
+  );
+}

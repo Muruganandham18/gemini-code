@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { parseGeminiReply, looksLikeAbandonedWork } from "../agent/toolCallParser.js";
+import { parseGeminiReply, looksLikeAbandonedWork, looksUnfinished } from "../agent/toolCallParser.js";
 import { formatToolResult, buildContextDocument, buildSystemPrimer } from "../agent/promptTemplate.js";
 import { AgentSession } from "../agent/loop.js";
 import type { IGeminiDriver, GeminiResponse } from "../driver/IGeminiDriver.js";
@@ -28,6 +28,7 @@ import { ensureMemoryFile, appendMemory, readMemory, MEMORY_FILENAME } from "../
 import { collectProjectDocs } from "../context/projectDocs.js";
 import { isImagePath, normalizeDroppedPath } from "../context/clipboard.js";
 import { CheckpointStore } from "../context/checkpoint.js";
+import { createUpdatePlanTool } from "../tools/updatePlan.js";
 import { confirmAction } from "../tools/confirm.js";
 import { setAsker } from "../ui/prompt.js";
 import { PlanJournal, readPlan, findResumablePlan, clearPlan } from "../context/plan.js";
@@ -252,6 +253,59 @@ async function main() {
     const bad = await checkOutputTool.run({ id: "bg_nope" });
     assert.equal(bad.ok, false);
     assert.match(bad.output, /No background process/);
+  });
+
+  console.log("Stopping early (progress reports treated as final):");
+  await test("spots a progress report that isn't actually finished", () => {
+    // The exact shape seen in a real migration run.
+    assert.ok(looksUnfinished({
+      text: "The migration of ClientApp to Vue 3 and Kite 2.0 is underway.\n\n1. Package Architecture\nDependencies Updated",
+      codeBlocks: [],
+    }));
+    assert.ok(looksUnfinished({ text: "I will now update the router configuration.", codeBlocks: [] }));
+    assert.ok(looksUnfinished({ text: "Done with step 1. Next steps: migrate the views.", codeBlocks: [] }));
+    assert.ok(looksUnfinished({ text: "So far: 3 of 8 components converted.", codeBlocks: [] }));
+  });
+
+  await test("lets a genuinely finished answer end the task", () => {
+    assert.ok(!looksUnfinished({ text: "The migration is complete. All 8 components now use Vue 3.", codeBlocks: [] }));
+    assert.ok(!looksUnfinished({ text: "The version in package.json is 1.2.3.", codeBlocks: [] }));
+    assert.ok(!looksUnfinished({ text: "I have successfully implemented the login form.", codeBlocks: [] }));
+    assert.ok(!looksUnfinished({ text: "All steps are done.", codeBlocks: [] }));
+  });
+
+  await test("pushes on when the plan still has open steps", async () => {
+    const root = path.resolve(process.cwd(), ".tmp-test");
+    const journal = new PlanJournal(root);
+    const driver = new FakeDriver([
+      // The agent records its plan...
+      toolCallResponse("update_plan", {
+        steps: [{ title: "update deps", done: false }, { title: "migrate views", done: false }],
+      }),
+      // ...then stops early with a progress report, which used to end the task.
+      finalResponse("Migration underway. Package architecture updated."),
+      // After the nudge it carries on and ticks the steps off.
+      toolCallResponse("update_plan", {
+        steps: [{ title: "update deps", done: true }, { title: "migrate views", done: true }],
+      }),
+      finalResponse("The migration is complete."),
+    ]);
+    const session = new AgentSession(driver, {}, [createUpdatePlanTool(journal)], journal);
+
+    const answer = await session.runTask("migrate the app");
+    assert.equal(answer, "The migration is complete.", "must not stop on the progress report");
+    const nudge = driver.sentMessages.find((m) => /not a finished task/.test(m));
+    assert.ok(nudge, "should have pushed it to continue");
+    assert.match(String(nudge), /update deps/, "should name the open steps");
+    await clearPlan(root);
+  });
+
+  await test("gives up nudging so a real answer can't loop forever", async () => {
+    const stubborn = finalResponse("Work is underway, next steps to follow.");
+    const driver = new FakeDriver([stubborn, stubborn, stubborn, stubborn, stubborn, stubborn]);
+    const answer = await new AgentSession(driver).runTask("do it");
+    assert.match(answer, /underway/, "accepts it once the nudges are spent");
+    assert.ok(driver.sentMessages.length <= 5, `bounded, sent ${driver.sentMessages.length}`);
   });
 
   console.log("Web search:");

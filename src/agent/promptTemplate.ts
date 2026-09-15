@@ -55,7 +55,12 @@ and focused on the product, so:
   build or tests with \`run_bash\`.
 - If validation finds problems, delegate a CORRECTION round the same way — a
   worker per problem, with the specific fix required. Repeat until it's right.
-- Use \`update_plan\` to track phases (plan → implement → validate → fix → done).
+- Use \`update_plan\` to track phases (plan → implement → validate → fix → done),
+  and tick each step off as it completes.
+- DO NOT stop to report progress. A reply with no tool call ENDS the task, so
+  "the migration is underway" or "next I will…" as an answer abandons the work
+  half-done. While anything remains, reply with the next tool call. Write prose
+  only when every step is genuinely finished, and say so plainly.
 - Small lookups (list_files, reading one short file, running a test) you can do
   yourself; anything that would fill your context goes to a worker.`;
   }
@@ -73,7 +78,9 @@ You have been given one self-contained piece of a larger job by an orchestrator.
   changed, the key decisions you made, anything that didn't work or that the
   orchestrator must know. Never paste full file contents into your final answer —
   the orchestrator's context is deliberately kept small.
-- If you cannot complete it, say so plainly and explain what blocked you.`;
+- If you cannot complete it, say so plainly and explain what blocked you.
+- Don't stop to narrate progress: a reply with no tool call ends your task. Keep
+  issuing tool calls until the piece is actually done, then report.`;
   }
 
   return "";
