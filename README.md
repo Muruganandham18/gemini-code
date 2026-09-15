@@ -43,7 +43,7 @@ The version is 0.1.0.
 
 ## Requirements
 
-- macOS (the `open-chrome` helper is macOS-specific; everything else is portable)
+- macOS, Linux or Windows
 - Node.js 20+
 - Google Chrome installed
 - A Gemini account you can sign into

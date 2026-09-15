@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { resolveProfileDir } from "../driver/GeminiDriver.js";
 
 export const DEBUG_PORT = 9222;
@@ -56,22 +58,66 @@ export async function ensureChromeRunning(log: (msg: string) => void = console.l
   );
 }
 
+/**
+ * Finds Chrome's executable on Windows and Linux.
+ *
+ * macOS is handled separately via `open -a`, which resolves the app by name
+ * regardless of where it's installed.
+ */
+export function findChromeExecutable(): string | undefined {
+  if (process.platform === "win32") {
+    const candidates = [
+      path.join(process.env["PROGRAMFILES"] ?? "C:\\Program Files", "Google/Chrome/Application/chrome.exe"),
+      path.join(
+        process.env["PROGRAMFILES(X86)"] ?? "C:\\Program Files (x86)",
+        "Google/Chrome/Application/chrome.exe"
+      ),
+      path.join(process.env["LOCALAPPDATA"] ?? "", "Google/Chrome/Application/chrome.exe"),
+    ];
+    return candidates.find((p) => p && existsSync(p));
+  }
+  // Linux: the usual names, in order of preference.
+  const linux = [
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/chromium",
+    "/snap/bin/chromium",
+  ];
+  return linux.find((p) => existsSync(p));
+}
+
 /** Spawns the browser window (no waiting, no output). */
 function launchChrome(): void {
   const profileDir = resolveProfileDir();
-  const child = spawn(
-    "open",
-    [
-      "-n",
-      "-a",
-      "Google Chrome",
-      "--args",
-      `--remote-debugging-port=${DEBUG_PORT}`,
-      `--user-data-dir=${profileDir}`,
-      "https://gemini.google.com/app",
-    ],
-    { stdio: "ignore", detached: true }
-  );
+  const args = [
+    `--remote-debugging-port=${DEBUG_PORT}`,
+    `--user-data-dir=${profileDir}`,
+    "https://gemini.google.com/app",
+  ];
+
+  let command: string;
+  let argv: string[];
+
+  if (process.platform === "darwin") {
+    // `open -n` forces a separate instance, so this never disturbs the
+    // user's everyday Chrome windows.
+    command = "open";
+    argv = ["-n", "-a", "Google Chrome", "--args", ...args];
+  } else {
+    const exe = findChromeExecutable();
+    if (!exe) {
+      throw new Error(
+        process.platform === "win32"
+          ? "Couldn't find chrome.exe. Install Google Chrome, or set GEMINI_CODE_CHROME to its full path."
+          : "Couldn't find Chrome. Install google-chrome or chromium, or set GEMINI_CODE_CHROME to its path."
+      );
+    }
+    command = process.env.GEMINI_CODE_CHROME || exe;
+    argv = args;
+  }
+
+  const child = spawn(command, argv, { stdio: "ignore", detached: true });
   child.unref();
 }
 
@@ -86,22 +132,10 @@ export function openChrome(): void {
       "open and run `gemini-code` in another terminal.\n"
   );
 
-  const child = spawn(
-    "open",
-    [
-      "-n",
-      "-a",
-      "Google Chrome",
-      "--args",
-      `--remote-debugging-port=${DEBUG_PORT}`,
-      `--user-data-dir=${profileDir}`,
-      "https://gemini.google.com/app",
-    ],
-    { stdio: "inherit" }
-  );
-
-  child.on("error", (err) => {
-    console.error("[gemini-code] Failed to launch Chrome:", err.message);
+  try {
+    launchChrome();
+  } catch (err) {
+    console.error("[gemini-code]", (err as Error).message);
     process.exit(1);
-  });
+  }
 }
