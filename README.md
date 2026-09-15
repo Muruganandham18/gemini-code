@@ -175,6 +175,7 @@ Semantic versioning, reported by `gemini-code --version`.
 
 | Version | Highlights |
 | --- | --- |
+| **0.3.0** | `web_search`, verified interactive browsing (click / back / type+submit / JS buttons) |
 | **0.2.1** | fixes confirmation prompts double-echoing and leaking answers into the task queue; cross-platform build fix |
 | **0.2.0** | interactive browsing, image input, file-editing tools, parallel workers, orchestrator mode, plan journal, `/undo`, cross-platform installers |
 | **0.1.0** | first working agent loop: prompted tool calls, read/write/bash, context and memory |
@@ -291,6 +292,10 @@ Gemini can see things, two ways:
   clipboard *text* to the process, so an image paste arrives as nothing at all and
   there's no keystroke to hook. Ctrl+V does reach the program, so that's the
   binding — same reason Claude Code uses it.
+- **It searches** — `web_search` returns titles, URLs and snippets (DuckDuckGo's
+  HTML endpoint: no API key, and not Google, which blocks automated requests).
+  For a package's current version, fetching the registry directly is more
+  reliable, and the tool description says so.
 - **It browses interactively** — `browser_open` opens a live tab and returns the
   page text *plus a numbered list of its buttons, links and inputs*;
   `browser_do` clicks them, types into them, submits, scrolls, goes back or
