@@ -64,6 +64,10 @@ from source if none is published yet), installs to `~/.gemini-code/app`, and put
 > Two files rather than one because `curl | bash` and `irm | iex` are different
 > shells that can't read the same script — Claude Code splits them the same way.
 
+> **Running a local copy of the script instead?** `irm` fetches a *URL*, so
+> `irm .\install.ps1` fails with "Invalid URI". For a file already on disk just
+> run it: `.\install.ps1` (PowerShell) or `bash install.sh`.
+
 Then just run it in any project:
 
 ```bash

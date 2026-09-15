@@ -10,7 +10,7 @@
     "open-chrome": "tsx src/scripts/openChrome.ts",
     "login": "tsx src/scripts/login.ts",
     "dev": "tsx src/cli.ts",
-    "build": "tsc -p . && chmod +x dist/cli.js",
+    "build": "tsc -p . && node scripts/postbuild.mjs",
     "start": "node dist/cli.js",
     "package": "bash scripts/package-release.sh",
     "prepublishOnly": "npm run build && npm test"
