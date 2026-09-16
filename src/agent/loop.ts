@@ -228,7 +228,11 @@ export class AgentSession {
     }
 
     await this.journal?.markInterrupted("hit the max tool-call turns");
-    return "(Stopped: hit the max tool-call turns for this task without a final answer.)";
+    return (
+      `(Stopped: hit the ${MAX_TOOL_TURNS_PER_TASK}-turn limit for one task without a final answer. ` +
+      `The plan was journalled, so asking me to continue picks up where it left off. ` +
+      `If this keeps happening on the same step, that step is looping rather than progressing.)`
+    );
   }
 
   /**
@@ -259,8 +263,13 @@ export class AgentSession {
             // beats losing the run.
             log(noteLine(`attachment failed (${(err as Error).message.split("\n")[0]}) — pasting truncated text instead`));
             const inlineFallback = await readFile(attachFile[0], "utf8").catch(() => "");
+            // The message above already told Gemini to read an attachment
+            // that isn't there. Say plainly that it doesn't exist, or the
+            // reply is "I can't see any attachment" and the task stalls
+            // re-asking for it.
             await this.driver.sendPrompt(
-              `${message}\n\n(The attachment didn't upload. Here is as much of it as fits:)\n\n` +
+              `${message}\n\nCORRECTION: that attachment FAILED to upload — there is no file to open, ` +
+                `so ignore the instruction to read one. The content itself follows inline:\n\n` +
                 inlineFallback.slice(0, MAX_INLINE_RESULT_CHARS) +
                 (inlineFallback.length > MAX_INLINE_RESULT_CHARS ? "\n\n[truncated]" : "")
             );
