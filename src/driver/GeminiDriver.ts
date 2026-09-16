@@ -524,15 +524,23 @@ export class GeminiDriver implements IGeminiDriver {
     // as documents. Filename text is kept only as a secondary signal, and
     // matched on a short slice because long names get ellipsized.
     const stem = fileName.replace(/\.[^.]+$/, "").slice(0, 12);
+
+    // The filename is evidence of THIS upload only if it wasn't already on
+    // the page. getByText searches the whole document, including the thread
+    // above the composer — and every tool result that attached a file left
+    // its name in that thread ("...ATTACHED to this message as
+    // run_bash-output.txt"). run_bash reuses one fixed filename, so from the
+    // SECOND oversized command output onwards the old message matched and a
+    // failed upload was reported ready. The prompt then went out claiming an
+    // attachment that wasn't there, Gemini answered that it couldn't see any
+    // output, and the loop burned its turns re-asking until it hit the cap.
+    //
+    // So compare counts rather than "is one visible": a genuinely new
+    // occurrence still registers, while pre-existing history does not.
+    const stemsBefore = await this.countText(stem);
     while (Date.now() < deadline) {
       const chips = await page.locator(selectors.attachmentChip).count().catch(() => 0);
-      const seen =
-        chips > chipsBefore ||
-        (await page
-          .getByText(stem, { exact: false })
-          .first()
-          .isVisible()
-          .catch(() => false));
+      const seen = chips > chipsBefore || (await this.countText(stem)) > stemsBefore;
       if (seen) {
         // Chip is present; give the upload a beat to finish processing.
         await page.waitForTimeout(1_500);
@@ -544,6 +552,12 @@ export class GeminiDriver implements IGeminiDriver {
       `Uploaded "${fileName}" but no attachment chip appeared within ${timeoutMs / 1000}s — ` +
         `the upload may have failed or selectors may need recalibrating.`
     );
+  }
+
+  /** How many times a piece of text appears on the page (0 if the lookup fails). */
+  private async countText(text: string): Promise<number> {
+    const page = this.requirePage();
+    return page.getByText(text, { exact: false }).count().catch(() => 0);
   }
 
   private async countResponses(): Promise<number> {

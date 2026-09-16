@@ -47,12 +47,26 @@ async function main() {
   console.log("ok - browser closed cleanly");
 
   await testInteractiveBrowsing();
+  await testAttachmentDetection();
 }
 
 main().catch((err) => {
   console.error("FAIL -", err);
   process.exit(1);
 });
+
+/**
+ * channel: "chrome" uses the Chrome already on the machine, so running the
+ * tests needs no `npx playwright install` download — and exercises the same
+ * browser real users run. GEMINI_CODE_CHROME_PATH overrides it for CI and
+ * containers, which have a Chromium binary but no Chrome channel.
+ */
+function launchTestBrowser() {
+  const executablePath = process.env.GEMINI_CODE_CHROME_PATH;
+  return executablePath
+    ? chromium.launch({ headless: true, executablePath })
+    : chromium.launch({ headless: true, channel: "chrome" });
+}
 
 /**
  * Drives a real page: reads its controls, types into a field, submits, and
@@ -74,10 +88,7 @@ async function testInteractiveBrowsing(): Promise<void> {
   });
   await new Promise<void>((r) => server.listen(8934, r));
 
-  // channel: "chrome" uses the Chrome already on the machine, so running
-  // the tests needs no `npx playwright install` download — and exercises
-  // the same browser real users run.
-  const browser = await chromium.launch({ headless: true, channel: "chrome" });
+  const browser = await launchTestBrowser();
   const context = await browser.newContext();
   const session = new BrowserSession(context);
 
@@ -113,5 +124,65 @@ async function testInteractiveBrowsing(): Promise<void> {
   } finally {
     await browser.close();
     server.close();
+  }
+}
+
+
+/**
+ * An upload that never lands must be REPORTED as not landed.
+ *
+ * waitForAttachmentReady's secondary signal was a page-wide
+ * `getByText(filename).isVisible()`. getByText searches the whole document,
+ * thread included — and every oversized tool result leaves its filename in
+ * that thread ("...ATTACHED to this message as run_bash-output.txt").
+ * run_bash reuses one fixed filename, so from the SECOND big command output
+ * onwards the previous turn's message matched and a failed upload was waved
+ * through. The prompt then went out claiming an attachment that wasn't
+ * there, Gemini replied that it could see no output, and the loop spent its
+ * remaining turns re-asking until it hit "max tool-call turns".
+ */
+async function testAttachmentDetection(): Promise<void> {
+  console.log("\nAttachment upload detection:");
+
+  const browser = await launchTestBrowser();
+  const page = await browser.newPage();
+
+  // A thread where an EARLIER turn attached run_bash-output.txt. No chip is
+  // on the composer now: this upload has not landed.
+  const history = `<!doctype html><body>
+    <div class="conversation"><div class="user-msg">TOOL_RESULT &gt;&gt;&gt;
+      Output was too long to paste (8213 characters), so it is ATTACHED to this
+      message as "run_bash-output.txt". Read the attached file.
+      &lt;&lt;&lt; END_TOOL_RESULT</div></div>
+    <div contenteditable="true"></div></body>`;
+
+  const driver = new GeminiDriver({ headless: true });
+  // Drive the real method against our page, without launching Gemini.
+  const asAny = driver as unknown as {
+    page: unknown;
+    waitForAttachmentReady(f: string, c: number, t?: number): Promise<void>;
+  };
+  asAny.page = page;
+
+  try {
+    await page.setContent(history);
+    let rejected = false;
+    await asAny
+      .waitForAttachmentReady("run_bash-output.txt", 0, 2_000)
+      .catch(() => (rejected = true));
+    assert.ok(rejected, "a filename already in the thread must NOT count as this upload landing");
+    console.log("  ok - a failed upload is not waved through by the previous turn's message");
+
+    // And a real upload still registers, even with that history present.
+    await page.setContent(
+      history.replace("<div contenteditable", '<div class="attachment-chip">run_bash-output.txt</div><div contenteditable')
+    );
+    await asAny.waitForAttachmentReady("run_bash-output.txt", 0, 5_000);
+    console.log("  ok - a genuine attachment chip is still detected");
+  } catch (err) {
+    console.log("  FAIL -", (err as Error).message);
+    process.exitCode = 1;
+  } finally {
+    await browser.close();
   }
 }
