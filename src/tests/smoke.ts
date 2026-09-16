@@ -19,6 +19,7 @@ import { editFileTool } from "../tools/editFile.js";
 import { searchCodeTool } from "../tools/searchCode.js";
 import { gitStatusTool, gitDiffTool } from "../tools/git.js";
 import { writeFileTool } from "../tools/writeFile.js";
+import { listFilesTool } from "../tools/listFiles.js";
 import { bashTool, checkOutputTool, killProcessTool, looksLongRunning } from "../tools/bash.js";
 import { fetchUrlTool } from "../tools/fetchUrl.js";
 import { webSearchTool, parseResults } from "../tools/webSearch.js";
@@ -210,6 +211,56 @@ async function main() {
     assert.ok(driver.sentMessages.length <= 4, "bounded, not an infinite nudge loop");
   });
 
+  console.log("Project-root containment:");
+  await test("a SIBLING directory that merely extends the root's name is refused", async () => {
+    // The bug this guards: `abs.startsWith(process.cwd())` is a string
+    // prefix test, so with the project at /home/me/app the path
+    // ../app-secrets/creds.txt resolved to /home/me/app-secrets/creds.txt,
+    // which "starts with" the root and was let through. read_file and
+    // list_files have no confirm gate, so it leaked silently.
+    const sibling = `${path.basename(process.cwd())}-escape-probe`;
+    const outside = path.resolve(process.cwd(), "..", sibling);
+    await mkdir(outside, { recursive: true });
+    await writeFile(path.join(outside, "creds.txt"), "CANARY", "utf8");
+
+    try {
+      const rel = path.join("..", sibling, "creds.txt");
+
+      const read = await readFileTool.run({ path: rel });
+      assert.equal(read.ok, false, "read_file must refuse a sibling-directory path");
+      assert.doesNotMatch(read.output, /CANARY/, "must not leak the file's contents");
+
+      const list = await listFilesTool.run({ path: path.join("..", sibling) });
+      assert.equal(list.ok, false, "list_files must refuse it too");
+      assert.doesNotMatch(list.output, /creds\.txt/, "must not leak the directory listing");
+
+      const wrote = await writeFileTool.run({ path: rel, content: "pwned" });
+      assert.equal(wrote.ok, false, "write_file must refuse it");
+
+      const edited = await editFileTool.run({ path: rel, old_text: "CANARY", new_text: "pwned" });
+      assert.equal(edited.ok, false, "edit_file must refuse it");
+
+      assert.equal(
+        await readFile(path.join(outside, "creds.txt"), "utf8"),
+        "CANARY",
+        "the file outside the project must be untouched"
+      );
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  await test("ordinary paths inside the project still work", async () => {
+    const inside = await readFileTool.run({ path: "package.json" });
+    assert.equal(inside.ok, true, "a normal relative path must not be caught by the guard");
+
+    const nested = await readFileTool.run({ path: "./src/../package.json" });
+    assert.equal(nested.ok, true, "a path that leaves and returns is still inside the root");
+
+    const root = await listFilesTool.run({ path: "." });
+    assert.equal(root.ok, true, "the root itself is inside the root");
+  });
+
   console.log("Long-running commands:");
   await test("recognises commands that never exit", () => {
     for (const cmd of ["npm run dev", "pnpm dev", "vite", "npx nodemon app.js", "uvicorn main:app",
@@ -258,6 +309,24 @@ async function main() {
     assert.match(r.output, /BuriedSymbol/, "the real error must be surfaced, not just the tail");
     assert.match(r.output, /Error lines found/);
     assert.match(r.output, /saved as "fg_/, "should point at the saved log");
+  });
+
+  await test("says so when it shows only a tail, instead of passing it off as the whole output", async () => {
+    // 40 lines, exit 0: under the old "is it big?" threshold, so the result
+    // was the last 25 lines labelled only "[saved as ...]" — the model saw
+    // output starting at "17" with nothing saying 16 lines were dropped.
+    const r = await bashTool.run({ command: "seq 1 40" });
+    assert.equal(r.ok, true);
+    assert.doesNotMatch(r.output, /^1$/m, "this really is a truncated tail");
+    assert.match(r.output, /15 earlier line\(s\) not shown/, "the dropped lines must be disclosed");
+    assert.match(r.output, /40 lines total/, "and the real size given");
+  });
+
+  await test("output short enough to show in full is not labelled as truncated", async () => {
+    const r = await bashTool.run({ command: "seq 1 5" });
+    assert.equal(r.ok, true);
+    assert.match(r.output, /^1$/m, "all of it is there");
+    assert.doesNotMatch(r.output, /not shown/, "nothing was dropped, so claim nothing was");
   });
 
   await test("check_output greps a saved log with context", async () => {

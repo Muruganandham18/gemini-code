@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
-import path from "node:path";
 import type { ToolDefinition } from "../types.js";
+import { resolveInRoot } from "./paths.js";
 
 /**
  * Beyond this, reading a whole file is almost certainly a mistake: it eats
@@ -21,10 +21,11 @@ export const readFileTool: ToolDefinition = {
     const rel = String(args.path ?? "");
     if (!rel) return { ok: false, output: "Error: 'path' is required." };
 
-    const abs = path.resolve(process.cwd(), rel);
-    if (!abs.startsWith(process.cwd())) {
+    const resolved = resolveInRoot(rel);
+    if (!resolved.ok) {
       return { ok: false, output: "Error: path escapes the project root, refusing to read it." };
     }
+    const abs = resolved.abs;
 
     let content: string;
     try {

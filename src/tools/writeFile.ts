@@ -1,6 +1,7 @@
 import { mkdir, writeFile as fsWriteFile } from "node:fs/promises";
 import path from "node:path";
 import type { ToolDefinition } from "../types.js";
+import { resolveInRoot } from "./paths.js";
 import { confirmAction } from "./confirm.js";
 import { checkpoints } from "../context/checkpoint.js";
 
@@ -15,10 +16,11 @@ export const writeFileTool: ToolDefinition = {
     const rel = String(args.path ?? "");
     const content = String(args.content ?? "");
     if (!rel) return { ok: false, output: "Error: 'path' is required." };
-    const abs = path.resolve(process.cwd(), rel);
-    if (!abs.startsWith(process.cwd())) {
+    const resolved = resolveInRoot(rel);
+    if (!resolved.ok) {
       return { ok: false, output: "Error: path escapes the project root, refusing to write it." };
     }
+    const abs = resolved.abs;
 
     const approved = await confirmAction("Write file?", `${rel} (${content.length} bytes)`);
     if (!approved) {

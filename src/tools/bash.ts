@@ -28,12 +28,26 @@ export interface BackgroundProcess {
  */
 export const backgroundProcesses = new Map<string, BackgroundProcess>();
 
+/**
+ * Splits output into lines, ignoring the single trailing newline almost every
+ * command ends with — otherwise `seq 1 40` gets reported as 40 lines of output
+ * plus a phantom 41st empty one.
+ */
+function toLines(content: string): string[] {
+  return (content.endsWith("\n") ? content.slice(0, -1) : content).split("\n");
+}
+
 /** Lines worth surfacing from a failed command, wherever they appear in it. */
 const ERROR_LINE = /\b(error|ERR!|failed|failure|exception|cannot find|not found|undefined reference|panic|traceback|fatal|refused)\b|^\s*✗|^\s*×/i;
 
-function summarizeLog(content: string, exitCode: number | null, tailLines = 25): string {
-  const lines = content.split("\n");
+function summarizeLog(
+  content: string,
+  exitCode: number | null,
+  tailLines = 25
+): { text: string; omitted: number } {
+  const lines = toLines(content);
   const tail = lines.slice(-tailLines).join("\n").trim();
+  const omitted = Math.max(0, lines.length - tailLines);
 
   // On failure, hunt out the error lines wherever they are — a 3000-line
   // build usually fails somewhere in the middle, and the tail is just the
@@ -45,10 +59,13 @@ function summarizeLog(content: string, exitCode: number | null, tailLines = 25):
       .slice(0, 30)
       .map(([n, l]) => `  line ${n}: ${l.trim().slice(0, 200)}`);
     if (errors.length) {
-      return `Error lines found in the output:\n${errors.join("\n")}\n\nLast ${tailLines} lines:\n${tail}`;
+      return {
+        text: `Error lines found in the output:\n${errors.join("\n")}\n\nLast ${tailLines} lines:\n${tail}`,
+        omitted,
+      };
     }
   }
-  return tail;
+  return { text: tail, omitted };
 }
 
 /**
@@ -161,14 +178,21 @@ function runForeground(command: string): Promise<{ ok: boolean; output: string }
         /* logging must never fail the command it's logging */
       }
 
-      const lineCount = out.split("\n").length;
-      const big = out.length > MAX_OUTPUT_CHARS || lineCount > 60;
+      const lineCount = toLines(out).length;
+      const summary = summarizeLog(out, killed ? 1 : code);
+
       // The id is always reported, not just for huge output: any command's
       // log may be worth grepping later, and re-running it to look again is
       // slower and can have side effects.
-      const pointer = big
-        ? `\n\n[${lineCount} lines total, saved as "${id}" — search it with ` +
-          `check_output {"id": "${id}", "grep": "error"} rather than re-running]`
+      //
+      // Whenever lines were dropped, SAY SO. Showing a bare tail as if it
+      // were the whole result is the same failure this logging exists to
+      // fix, just smaller: `seq 1 40` came back starting at "17" with
+      // nothing marking the 16 missing lines, so the model read a partial
+      // result as a complete one.
+      const pointer = summary.omitted
+        ? `\n\n[${summary.omitted} earlier line(s) not shown — ${lineCount} lines total, saved as "${id}". ` +
+          `Read them with check_output {"id": "${id}", "grep": "error"} rather than re-running]`
         : `\n[saved as "${id}"]`;
 
       if (killed) {
@@ -178,14 +202,14 @@ function runForeground(command: string): Promise<{ ok: boolean; output: string }
             `Command timed out after ${FOREGROUND_TIMEOUT_MS / 1000}s and was killed.\n` +
             `If this is a server or watcher that doesn't exit on its own, re-run it with ` +
             `"background": true — then use check_output to read its logs.\n\n` +
-            `Partial output:\n${summarizeLog(out, 1)}${pointer}`,
+            `Partial output:\n${summary.text}${pointer}`,
         });
       } else {
         resolve({
           ok: code === 0,
           output:
             (code === 0 ? "" : `Exit code ${code}\n`) +
-            (summarizeLog(out, code) || "(no output)") +
+            (summary.text || "(no output)") +
             pointer,
         });
       }
@@ -309,7 +333,7 @@ export const checkOutputTool: ToolDefinition = {
 
     const status = proc.exitCode === null ? "running" : `exited with code ${proc.exitCode}`;
     const header = `${proc.id} (${status}): ${proc.command}`;
-    const allLines = content.split("\n");
+    const allLines = toLines(content);
 
     // Searching beats paging: a failing build is thousands of lines and the
     // model only needs the handful that explain why.
