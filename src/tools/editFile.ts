@@ -1,6 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
 import type { ToolDefinition } from "../types.js";
+import { resolveInRoot } from "./paths.js";
 import { confirmAction } from "./confirm.js";
 import { checkpoints } from "../context/checkpoint.js";
 
@@ -36,10 +36,11 @@ export const editFileTool: ToolDefinition = {
       return { ok: false, output: "Error: 'old_text' and 'new_text' are identical — nothing to do." };
     }
 
-    const abs = path.resolve(process.cwd(), rel);
-    if (!abs.startsWith(process.cwd())) {
+    const resolved = resolveInRoot(rel);
+    if (!resolved.ok) {
       return { ok: false, output: "Error: path escapes the project root, refusing to edit it." };
     }
+    const abs = resolved.abs;
 
     let content: string;
     try {

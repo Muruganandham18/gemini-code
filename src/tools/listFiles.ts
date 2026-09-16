@@ -1,5 +1,5 @@
-import path from "node:path";
 import type { ToolDefinition } from "../types.js";
+import { resolveInRoot } from "./paths.js";
 import { buildProjectTree } from "../context/projectTree.js";
 
 export const listFilesTool: ToolDefinition = {
@@ -7,10 +7,11 @@ export const listFilesTool: ToolDefinition = {
   description: `list_files(args: {path?: string}) -> an ASCII tree of the project (or of a subdirectory). Use this instead of running \`ls\` via run_bash. Noise dirs (node_modules, .git, dist, venv, …) are excluded automatically.`,
   async run(args) {
     const rel = String(args.path ?? ".");
-    const abs = path.resolve(process.cwd(), rel);
-    if (!abs.startsWith(process.cwd())) {
+    const resolved = resolveInRoot(rel);
+    if (!resolved.ok) {
       return { ok: false, output: "Error: path escapes the project root, refusing to list it." };
     }
+    const abs = resolved.abs;
     try {
       const tree = await buildProjectTree({ root: abs });
       return { ok: true, output: tree };
