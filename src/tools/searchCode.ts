@@ -31,6 +31,39 @@ export interface SearchHit {
   text: string;
 }
 
+/** Minimal glob: `**` spans directories, `*` and `?` stay within one segment, `{a,b}` alternates. */
+export function globToRegExp(glob: string): RegExp {
+  const g = glob.trim().replace(/^\.\//, "");
+  let re = "";
+  let braces = 0;
+  for (let i = 0; i < g.length; i++) {
+    const ch = g[i];
+    if (ch === "*") {
+      if (g[i + 1] === "*") {
+        // "**/" matches zero or more directories.
+        if (g[i + 2] === "/") {
+          re += "(?:.*/)?";
+          i += 2;
+        } else {
+          re += ".*";
+          i += 1;
+        }
+      } else {
+        re += "[^/]*";
+      }
+    } else if (ch === "?") re += "[^/]";
+    else if (ch === "{") {
+      braces++;
+      re += "(?:";
+    } else if (ch === "}" && braces > 0) {
+      braces--;
+      re += ")";
+    } else if (ch === "," && braces > 0) re += "|";
+    else re += ch.replace(/[.+^$()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp("^" + re + "$", "i");
+}
+
 export async function searchCode(opts: {
   pattern: string;
   root?: string;
@@ -41,10 +74,10 @@ export async function searchCode(opts: {
   const root = opts.root ?? process.cwd();
   const max = Math.min(opts.maxResults ?? 100, MAX_RESULTS);
   const re = new RegExp(opts.pattern, opts.caseSensitive ? "" : "i");
-  // A simple *.ts / *.py style filter, not full glob semantics.
-  const globRe = opts.glob
-    ? new RegExp("^" + opts.glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$", "i")
-    : undefined;
+  const globRe = opts.glob ? globToRegExp(opts.glob) : undefined;
+  // "*.ts" filters by filename; "src/components/*.vue" or "src/**/*.ts"
+  // by path relative to the root — models write both.
+  const globOnPath = !!opts.glob && opts.glob.includes("/");
 
   const hits: SearchHit[] = [];
   let filesScanned = 0;
@@ -67,7 +100,10 @@ export async function searchCode(opts: {
         continue;
       }
       if (BINARY_EXT.test(entry.name)) continue;
-      if (globRe && !globRe.test(entry.name)) continue;
+      if (globRe) {
+        const subject = globOnPath ? path.relative(root, full).split(path.sep).join("/") : entry.name;
+        if (!globRe.test(subject)) continue;
+      }
 
       try {
         const info = await stat(full);
@@ -99,7 +135,7 @@ export const searchCodeTool: ToolDefinition = {
   description:
     `search_code(args: {pattern: string, glob?: string, caseSensitive?: boolean, maxResults?: number}) -> searches ` +
     `the project for a regular expression and returns file:line matches. Use this to FIND things before reading ` +
-    `them — it's far cheaper than reading whole files to look around. 'glob' filters by filename (e.g. "*.ts"). ` +
+    `them — it's far cheaper than reading whole files to look around. 'glob' filters by filename ("*.ts") or by path ("src/components/*.vue", "src/**/*.ts"). ` +
     `Build/noise directories and binary files are skipped automatically.`,
   async run(args) {
     const pattern = String(args.pattern ?? "");

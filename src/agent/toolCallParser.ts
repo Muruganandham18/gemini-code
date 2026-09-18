@@ -26,18 +26,33 @@ function extractJsonObject(raw: string): unknown {
   throw new Error("unbalanced braces");
 }
 
-function asToolCall(parsed: unknown): ToolCall | undefined {
-  if (
-    typeof parsed === "object" &&
-    parsed !== null &&
-    typeof (parsed as Record<string, unknown>).name === "string" &&
-    typeof (parsed as Record<string, unknown>).args === "object" &&
-    (parsed as Record<string, unknown>).args !== null
-  ) {
-    const obj = parsed as { name: string; args: Record<string, unknown> };
-    return { name: obj.name, args: obj.args };
+const ARG_KEYS = ["args", "arguments", "parameters", "params", "input"] as const;
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * The canonical shape is {name, args}. Gemini also drifts into two others:
+ * `arguments`/`parameters` instead of `args`, and args flattened next to
+ * `name` ({"name": "search_code", "pattern": "x"}). A real run lost a whole
+ * worker to the flat form — it was read as prose, so the worker's "final
+ * answer" was a tool call it never got to make.
+ *
+ * The drifted shapes are only accepted for a name that IS a tool, because
+ * {"name": ...} is also what package.json and plenty of other JSON look like.
+ */
+function asToolCall(parsed: unknown, knownTools?: ReadonlySet<string>): ToolCall | undefined {
+  if (!isPlainObject(parsed) || typeof parsed.name !== "string") return undefined;
+  const name = parsed.name;
+  if (isPlainObject(parsed.args)) return { name, args: parsed.args };
+  if (!knownTools?.has(name)) return undefined;
+
+  for (const key of ARG_KEYS) {
+    if (isPlainObject(parsed[key])) return { name, args: parsed[key] as Record<string, unknown> };
   }
-  return undefined;
+  const { name: _name, ...rest } = parsed;
+  return { name, args: rest };
 }
 
 /**
@@ -50,14 +65,14 @@ function asToolCall(parsed: unknown): ToolCall | undefined {
  * a code block whose content is JSON shaped like {name, args}", not the
  * fence markers themselves. `response.codeBlocks` carries exactly that.
  */
-export function parseGeminiReply(response: GeminiResponse): ParseResult {
+export function parseGeminiReply(response: GeminiResponse, knownTools?: ReadonlySet<string>): ParseResult {
   const candidates = [...response.codeBlocks];
   const fencedMatch = response.text.match(FENCED_TOOL_RE);
   if (fencedMatch) candidates.unshift(fencedMatch[1].trim());
 
   for (const candidate of candidates) {
     try {
-      const call = asToolCall(extractJsonObject(candidate));
+      const call = asToolCall(extractJsonObject(candidate), knownTools);
       if (call) return { kind: "tool_call", call };
     } catch {
       // Not this candidate — try the next one, or fall through below.
@@ -68,7 +83,9 @@ export function parseGeminiReply(response: GeminiResponse): ParseResult {
   // (has the shape of our tool-call JSON without being valid/complete),
   // treat it as malformed so the loop asks Gemini to retry, rather than
   // silently accepting broken JSON as a final answer.
-  const attempted = candidates.find((c) => /"name"\s*:/.test(c) && /"args"\s*:/.test(c));
+  const namesKnownTool = (c: string) =>
+    [...(knownTools ?? [])].some((t) => new RegExp(`"name"\\s*:\\s*"${t}"`).test(c));
+  const attempted = candidates.find((c) => (/"name"\s*:/.test(c) && /"args"\s*:/.test(c)) || namesKnownTool(c));
   if (attempted) {
     return {
       kind: "malformed",
