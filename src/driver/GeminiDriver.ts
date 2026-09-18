@@ -1,7 +1,7 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import path from "node:path";
 import { homedir } from "node:os";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { selectors } from "./selectors.js";
 import type { IGeminiDriver, GeminiResponse } from "./IGeminiDriver.js";
 import { resolveModel, modelHelp, EXTENDED_THINKING } from "./models.js";
@@ -392,6 +392,15 @@ export class GeminiDriver implements IGeminiDriver {
     // executed it a second time ("it's sending multiple times").
     this.responseCountBeforeSend = await this.countResponses();
 
+    // A previous reply that is still streaming (or a worker's reply the
+    // loop read early) turns the send button into "Stop", and nothing we
+    // type can be submitted until it finishes.
+    await page
+      .locator(`${selectors.stopButton} >> visible=true`)
+      .first()
+      .waitFor({ state: "hidden", timeout: 120_000 })
+      .catch(() => undefined);
+
     const box = page.locator(selectors.composerInput).first();
     await box.click();
 
@@ -438,14 +447,68 @@ export class GeminiDriver implements IGeminiDriver {
     await page.keyboard.press("Enter");
     if (await this.composerCleared(2_500)) return;
 
-    await page.locator(`${selectors.sendButton} >> visible=true`).first().click({ timeout: 10_000 });
+    await page
+      .locator(`${selectors.sendButton} >> visible=true`)
+      .first()
+      .click({ timeout: 10_000 })
+      .catch(() => undefined);
     if (await this.composerCleared(10_000)) return;
 
     throw new Error(
       "Typed the prompt but couldn't submit it — neither Enter nor the send button cleared " +
-        "the composer. If the message starts with a ``` fence the composer enters code-block " +
-        "mode and refuses to send; otherwise recalibrate selectors.sendButton (README step 2)."
+        `the composer. ${await this.diagnoseSendFailure()}`
     );
+  }
+
+  /**
+   * Says WHY a send didn't go through, from what's actually on the page, and
+   * saves a screenshot — a bare "couldn't submit" gave nothing to act on
+   * when it happened in a live run with the tab already closed.
+   */
+  private async diagnoseSendFailure(): Promise<string> {
+    const page = this.requirePage();
+    const facts: string[] = [];
+    try {
+      if (await page.locator(`${selectors.stopButton} >> visible=true`).count()) {
+        facts.push("Gemini is still generating the previous reply (the Stop button is showing).");
+      }
+      const send = page.locator(`${selectors.sendButton} >> visible=true`).first();
+      if (!(await send.count())) facts.push("No send button is visible.");
+      else if (await send.isDisabled().catch(() => false)) facts.push("The send button is disabled.");
+
+      const notices = await page.evaluate(`(() => {
+        const sel = '[role="alert"], [role="status"], [aria-live="assertive"], snack-bar-container, ' +
+          '.mat-mdc-snack-bar-container, [class*="snackbar" i], [class*="banner" i], [class*="warning" i]';
+        const seen = new Set();
+        for (const el of document.querySelectorAll(sel)) {
+          const t = (el.innerText || "").trim().replace(/\\s+/g, " ");
+          const r = el.getBoundingClientRect();
+          if (t && t.length < 300 && r.width > 0 && r.height > 0) seen.add(t);
+        }
+        return [...seen].slice(0, 5);
+      })()`) as string[];
+      if (notices.length) facts.push(`On-page notice: ${notices.map((n) => `"${n}"`).join("; ")}.`);
+    } catch {
+      // Diagnosis is best-effort; never mask the original failure.
+    }
+
+    try {
+      const dir = path.join(homedir(), ".gemini-code", "logs");
+      mkdirSync(dir, { recursive: true });
+      const shot = path.join(dir, `send-failure-${Date.now()}.png`);
+      await page.screenshot({ path: shot });
+      facts.push(`Screenshot: ${shot}`);
+    } catch {
+      // ditto
+    }
+
+    if (!facts.some((f) => !f.startsWith("Screenshot"))) {
+      facts.unshift(
+        "Nothing on the page explains it. If the message starts with a ``` fence the composer enters " +
+          "code-block mode and refuses to send; otherwise recalibrate selectors.sendButton (README step 2)."
+      );
+    }
+    return facts.join(" ");
   }
 
   /** True once the composer holds non-empty text (i.e. our typing landed). */
