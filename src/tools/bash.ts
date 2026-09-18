@@ -1,10 +1,55 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { openSync, closeSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import type { ToolDefinition } from "../types.js";
 import { confirmAction } from "./confirm.js";
 
 const TMP_DIR = ".gemini-code-tmp";
+const IS_WINDOWS = process.platform === "win32";
+
+/**
+ * Which shell commands run in.
+ *
+ * `shell: true` means cmd.exe on Windows, but the model writes bash — the
+ * tool is called run_bash, and `ls`, `rm -rf`, `grep` or `export X=1` all
+ * fail under cmd. Git for Windows ships a real bash, and most developers on
+ * Windows who'd use this have it, so prefer that. GEMINI_CODE_SHELL
+ * overrides (e.g. "powershell.exe" or "cmd.exe").
+ */
+export function resolveShell(): string | true {
+  if (process.env.GEMINI_CODE_SHELL) return process.env.GEMINI_CODE_SHELL;
+  if (!IS_WINDOWS) return true; // /bin/sh — fine everywhere else
+
+  const candidates = [
+    `${process.env["ProgramFiles"] ?? "C:\\Program Files"}\\Git\\bin\\bash.exe`,
+    `${process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)"}\\Git\\bin\\bash.exe`,
+    `${process.env["LOCALAPPDATA"] ?? ""}\\Programs\\Git\\bin\\bash.exe`,
+  ];
+  const found = candidates.find((p) => p && existsSync(p));
+  return found ?? true; // no Git Bash: fall back to cmd.exe
+}
+
+const SHELL = resolveShell();
+const SHELL_NAME =
+  SHELL === true ? (IS_WINDOWS ? "cmd.exe" : "sh") : (SHELL.split(/[\\/]/).pop() ?? SHELL);
+
+/**
+ * spawn options that behave the same on every platform.
+ *
+ * `detached` is what lets us kill a whole process group on Unix — but on
+ * Windows it gives the child ITS OWN CONSOLE WINDOW, so the command runs in
+ * a separate cmd window and its output never reaches us. Windows kills the
+ * tree with taskkill instead (see killGroup), so it doesn't need it.
+ */
+function spawnOptions(extra: Record<string, unknown> = {}) {
+  return {
+    cwd: process.cwd(),
+    shell: SHELL,
+    detached: !IS_WINDOWS,
+    windowsHide: true,
+    ...extra,
+  };
+}
 const FOREGROUND_TIMEOUT_MS = Number(process.env.GEMINI_CODE_BASH_TIMEOUT_MS ?? 60_000);
 const MAX_OUTPUT_CHARS = 20_000;
 
@@ -98,6 +143,11 @@ function tail(text: string, chars = MAX_OUTPUT_CHARS): string {
  * a negative PID takes the entire tree down.
  */
 function killGroup(pid: number): void {
+  if (IS_WINDOWS) {
+    // No process groups: taskkill /T walks the tree (npm -> node), /F forces.
+    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true });
+    return;
+  }
   try {
     process.kill(-pid, "SIGTERM");
   } catch {
@@ -124,7 +174,7 @@ function runForeground(command: string): Promise<{ ok: boolean; output: string }
     // Intentionally shell-based: the point of this tool is running real
     // command lines, pipes and redirects included, exactly like Claude
     // Code's Bash tool. The control is the confirm() gate, not arg escaping.
-    const child = spawn(command, { cwd: process.cwd(), shell: true, detached: true });
+    const child = spawn(command, spawnOptions());
     let out = "";
     let killed = false;
 
@@ -198,12 +248,7 @@ function runBackground(command: string): { ok: boolean; output: string } {
   const logPath = path.join(tmpDir(), `${id}.log`);
   const fd = openSync(logPath, "a");
 
-  const child = spawn(command, {
-    cwd: process.cwd(),
-    shell: true,
-    detached: true,
-    stdio: ["ignore", fd, fd],
-  });
+  const child = spawn(command, spawnOptions({ stdio: ["ignore", fd, fd] }));
   child.unref();
   closeSync(fd);
 
@@ -235,7 +280,8 @@ function runBackground(command: string): { ok: boolean; output: string } {
 export const bashTool: ToolDefinition = {
   name: "run_bash",
   description:
-    `run_bash(args: {command: string, background?: boolean}) -> runs a shell command in the project root. ` +
+    `run_bash(args: {command: string, background?: boolean}) -> runs a shell command in the project root ` +
+    `(shell: ${SHELL_NAME} on ${process.platform}). ` +
     `Returns its output, or times out after ${FOREGROUND_TIMEOUT_MS / 1000}s. ` +
     `Set background: true for anything that does NOT exit on its own — dev servers, watchers, tails — ` +
     `and it returns an id immediately instead of blocking; read its logs with check_output. ` +

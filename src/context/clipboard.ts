@@ -84,6 +84,7 @@ async function readOnWindows(outPath: string): Promise<{ path?: string; reason?:
   try {
     const { stdout } = await run("powershell", ["-NoProfile", "-STA", "-Command", ps], {
       timeout: 20_000,
+      windowsHide: true, // otherwise a console window flashes up on every paste
     });
     if (stdout.includes("NO_IMAGE")) {
       return { reason: "the clipboard has no image on it (copy a screenshot first)" };
