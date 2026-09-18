@@ -89,10 +89,20 @@ function summarizeLog(
   content: string,
   exitCode: number | null,
   tailLines = 25
-): { text: string; omitted: number } {
+): { text: string; omitted: number; clippedChars: number } {
   const lines = toLines(content);
-  const tail = lines.slice(-tailLines).join("\n").trim();
+  let tail = lines.slice(-tailLines).join("\n").trim();
   const omitted = Math.max(0, lines.length - tailLines);
+
+  // Counting lines alone misses the other way output gets big: one enormous
+  // line (minified bundles, JSON dumps, progress bars redrawn with \r). A
+  // 300 KB single line went to the model whole, with no note that anything
+  // was off. Keep the END of it, like the tail, and report the clip.
+  let clippedChars = 0;
+  if (tail.length > MAX_OUTPUT_CHARS) {
+    clippedChars = tail.length - MAX_OUTPUT_CHARS;
+    tail = tail.slice(-MAX_OUTPUT_CHARS);
+  }
 
   // On failure, hunt out the error lines wherever they are — a 3000-line
   // build usually fails somewhere in the middle, and the tail is just the
@@ -107,10 +117,11 @@ function summarizeLog(
       return {
         text: `Error lines found in the output:\n${errors.join("\n")}\n\nLast ${tailLines} lines:\n${tail}`,
         omitted,
+        clippedChars,
       };
     }
   }
-  return { text: tail, omitted };
+  return { text: tail, omitted, clippedChars };
 }
 
 /**
@@ -240,8 +251,12 @@ function runForeground(command: string): Promise<{ ok: boolean; output: string }
       // fix, just smaller: `seq 1 40` came back starting at "17" with
       // nothing marking the 16 missing lines, so the model read a partial
       // result as a complete one.
-      const pointer = summary.omitted
-        ? `\n\n[${summary.omitted} earlier line(s) not shown — ${lineCount} lines total, saved as "${id}". ` +
+      const dropped = [
+        summary.omitted ? `${summary.omitted} earlier line(s)` : "",
+        summary.clippedChars ? `${summary.clippedChars} characters of an over-long line` : "",
+      ].filter(Boolean);
+      const pointer = dropped.length
+        ? `\n\n[${dropped.join(" and ")} not shown — ${lineCount} lines total, saved as "${id}". ` +
           `Read them with check_output {"id": "${id}", "grep": "error"} rather than re-running]`
         : `\n[saved as "${id}"]`;
 

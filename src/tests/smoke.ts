@@ -350,6 +350,15 @@ async function main() {
     assert.match(r.output, /40 lines total/, "and the real size given");
   });
 
+  await test("one enormous line is clipped and disclosed, not passed through whole", async () => {
+    // A single 300 KB line has no "earlier lines" to drop, so a line-count
+    // check alone let all of it through to the model.
+    const r = await bashTool.run({ command: `node -e "process.stdout.write('x'.repeat(300000))"` });
+    assert.equal(r.ok, true);
+    assert.ok(r.output.length < 25_000, `output should be capped, was ${r.output.length} chars`);
+    assert.match(r.output, /characters of an over-long line not shown/);
+  });
+
   await test("output short enough to show in full is not labelled as truncated", async () => {
     const r = await bashTool.run({ command: "seq 1 5" });
     assert.equal(r.ok, true);
