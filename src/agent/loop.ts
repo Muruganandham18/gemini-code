@@ -70,6 +70,7 @@ export class AgentSession {
   /** Static tools plus any session-scoped ones (e.g. delegate_tasks). */
   private readonly tools: ToolDefinition[];
   private readonly toolsByName: Record<string, ToolDefinition>;
+  private readonly toolNames: ReadonlySet<string>;
 
   constructor(
     private readonly driver: IGeminiDriver,
@@ -85,6 +86,7 @@ export class AgentSession {
   ) {
     this.tools = [...tools, ...extraTools];
     this.toolsByName = Object.fromEntries(this.tools.map((t) => [t.name, t]));
+    this.toolNames = new Set(Object.keys(this.toolsByName));
   }
 
   /** Runs one user task to completion, including any tool-call back-and-forth. Returns Gemini's final plain-text answer. */
@@ -146,7 +148,7 @@ export class AgentSession {
       await this.cleanupAttachments(attachFile);
       attachFile = [];
 
-      const parsed = parseGeminiReply(reply);
+      const parsed = parseGeminiReply(reply, this.toolNames);
 
       if (parsed.kind === "final") {
         // A reply that pastes code while saying "I'll create the file" was
