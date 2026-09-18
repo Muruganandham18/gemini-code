@@ -19,7 +19,7 @@ import { editFileTool } from "../tools/editFile.js";
 import { searchCodeTool } from "../tools/searchCode.js";
 import { gitStatusTool, gitDiffTool } from "../tools/git.js";
 import { writeFileTool } from "../tools/writeFile.js";
-import { bashTool, checkOutputTool, killProcessTool, looksLongRunning } from "../tools/bash.js";
+import { bashTool, checkOutputTool, killProcessTool, looksLongRunning, resolveShell } from "../tools/bash.js";
 import { fetchUrlTool } from "../tools/fetchUrl.js";
 import { webSearchTool, parseResults } from "../tools/webSearch.js";
 import { resolveModel, DEFAULT_MODEL_ALIAS, EXTENDED_THINKING } from "../driver/models.js";
@@ -280,6 +280,26 @@ async function main() {
     const bad = await checkOutputTool.run({ id: useId, grep: "([unclosed" });
     assert.equal(bad.ok, false);
     assert.match(bad.output, /Invalid 'grep'/);
+  });
+
+  await test("GEMINI_CODE_SHELL overrides the shell commands run in", () => {
+    const before = process.env.GEMINI_CODE_SHELL;
+    try {
+      process.env.GEMINI_CODE_SHELL = "powershell.exe";
+      assert.equal(resolveShell(), "powershell.exe");
+      delete process.env.GEMINI_CODE_SHELL;
+      // Off Windows, the default is Node's own /bin/sh.
+      if (process.platform !== "win32") assert.equal(resolveShell(), true);
+    } finally {
+      if (before === undefined) delete process.env.GEMINI_CODE_SHELL;
+      else process.env.GEMINI_CODE_SHELL = before;
+    }
+  });
+
+  await test("run_bash tells the model which shell and OS it's in", () => {
+    // On Windows that's the difference between writing bash and cmd syntax.
+    assert.match(bashTool.description, new RegExp(`on ${process.platform}`));
+    assert.match(bashTool.description, /shell: /);
   });
 
   await test("check_output lists processes and rejects unknown ids", async () => {

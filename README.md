@@ -156,6 +156,7 @@ GEMINI-PLAN.md
 | "this browser or app may not be secure" | You tried signing in inside an automated browser — use `gemini-code open-chrome`, which opens a normal one |
 | Nothing sends / `no new response ever appeared` | Gemini's markup changed; recalibrate [`src/driver/selectors.ts`](src/driver/selectors.ts) |
 | Replies but takes no action | Protocol drift in a long thread — `/clear` starts a fresh one |
+| Windows: commands fail on `ls`, `rm -rf`, `grep` | No Git Bash found, so they ran in cmd.exe. Install [Git for Windows](https://git-scm.com/download/win) or set `GEMINI_CODE_SHELL` |
 
 ### Why there's no single-file binary
 
@@ -175,6 +176,7 @@ Semantic versioning, reported by `gemini-code --version`.
 
 | Version | Highlights |
 | --- | --- |
+| **0.4.1** | Windows: commands run in the same console with output captured, Git Bash preferred over cmd, process trees killed properly |
 | **0.4.0** | command output saved to searchable logs; errors surfaced from anywhere in a long build |
 | **0.3.1** | stops the loop ending on a progress report; continuation nudging from the plan |
 | **0.3.0** | `web_search`, verified interactive browsing (click / back / type+submit / JS buttons) |
@@ -250,6 +252,7 @@ Typing **while a task runs** steers it — your text is folded into the next tur
 | `GEMINI_CODE_REMINDER_TURNS` | `5` | how often the tool-call contract is restated |
 | `GEMINI_CODE_DRIFT_NUDGES` | `2` | nudges when a reply abandons the protocol |
 | `GEMINI_CODE_BASH_TIMEOUT_MS` | `60000` | foreground command timeout |
+| `GEMINI_CODE_SHELL` | Git Bash on Windows, else `sh` | shell commands run in (e.g. `powershell.exe`) |
 
 ## How it works
 
