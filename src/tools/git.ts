@@ -16,7 +16,7 @@ const MAX_DIFF_CHARS = 15_000;
  */
 async function git(args: string[]): Promise<{ ok: boolean; out: string }> {
   try {
-    const { stdout } = await run("git", args, { cwd: process.cwd(), maxBuffer: 20 * 1024 * 1024 });
+    const { stdout } = await run("git", args, { cwd: process.cwd(), maxBuffer: 20 * 1024 * 1024, windowsHide: true });
     return { ok: true, out: stdout };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; message: string };

@@ -16,11 +16,11 @@ import { AgentSession } from "../agent/loop.js";
 import type { IGeminiDriver, GeminiResponse } from "../driver/IGeminiDriver.js";
 import { readFileTool } from "../tools/readFile.js";
 import { editFileTool } from "../tools/editFile.js";
-import { searchCodeTool } from "../tools/searchCode.js";
+import { searchCodeTool, globToRegExp } from "../tools/searchCode.js";
 import { gitStatusTool, gitDiffTool } from "../tools/git.js";
 import { writeFileTool } from "../tools/writeFile.js";
 import { listFilesTool } from "../tools/listFiles.js";
-import { bashTool, checkOutputTool, killProcessTool, looksLongRunning } from "../tools/bash.js";
+import { bashTool, checkOutputTool, killProcessTool, looksLongRunning, resolveShell } from "../tools/bash.js";
 import { fetchUrlTool } from "../tools/fetchUrl.js";
 import { webSearchTool, parseResults } from "../tools/webSearch.js";
 import { resolveModel, DEFAULT_MODEL_ALIAS, EXTENDED_THINKING } from "../driver/models.js";
@@ -61,6 +61,9 @@ function toolCallResponse(name: string, args: Record<string, unknown>): GeminiRe
 }
 function malformedToolResponse(rawJsonish: string): GeminiResponse {
   return { text: `Code snippet\n${rawJsonish}`, codeBlocks: [rawJsonish] };
+}
+function toolCallResponseRaw(json: string): GeminiResponse {
+  return { text: `JSON\n${json}`, codeBlocks: [json] };
 }
 function finalResponse(text: string): GeminiResponse {
   return { text, codeBlocks: [] };
@@ -137,6 +140,31 @@ async function main() {
       finalResponse('```tool\n{"name": "read_file", "args": {"path": "x.txt"}}\n```')
     );
     assert.equal(result.kind, "tool_call");
+  });
+
+  await test("accepts drifted tool-call shapes, but only for real tool names", () => {
+    const known = new Set(["search_code", "read_file", "git_status"]);
+    // The exact reply that silently ended a worker in a live run.
+    const flat = parseGeminiReply(
+      { text: 'JSON\n{"name": "search_code", "pattern": "\\\\$bus"}', codeBlocks: ['{"name": "search_code", "pattern": "\\\\$bus"}'] },
+      known
+    );
+    assert.equal(flat.kind, "tool_call");
+    if (flat.kind === "tool_call") assert.deepEqual(flat.call, { name: "search_code", args: { pattern: "\\$bus" } });
+
+    const alt = parseGeminiReply(toolCallResponseRaw('{"name": "read_file", "arguments": {"path": "a.txt"}}'), known);
+    assert.ok(alt.kind === "tool_call" && alt.call.args.path === "a.txt");
+
+    const noArgs = parseGeminiReply(toolCallResponseRaw('{"name": "git_status"}'), known);
+    assert.ok(noArgs.kind === "tool_call" && noArgs.call.name === "git_status");
+
+    // package.json in a final answer must stay prose.
+    const pkg = parseGeminiReply(toolCallResponseRaw('{"name": "vue2-dashboard", "version": "1.0.0"}'), known);
+    assert.equal(pkg.kind, "final");
+
+    // A broken call naming a real tool gets a retry instead of ending the turn.
+    const broken = parseGeminiReply(toolCallResponseRaw('{"name": "search_code", "pattern": oops}'), known);
+    assert.equal(broken.kind, "malformed");
   });
 
   await test("formatToolResult never starts with a ``` fence", () => {
@@ -349,6 +377,26 @@ async function main() {
     const bad = await checkOutputTool.run({ id: useId, grep: "([unclosed" });
     assert.equal(bad.ok, false);
     assert.match(bad.output, /Invalid 'grep'/);
+  });
+
+  await test("GEMINI_CODE_SHELL overrides the shell commands run in", () => {
+    const before = process.env.GEMINI_CODE_SHELL;
+    try {
+      process.env.GEMINI_CODE_SHELL = "powershell.exe";
+      assert.equal(resolveShell(), "powershell.exe");
+      delete process.env.GEMINI_CODE_SHELL;
+      // Off Windows, the default is Node's own /bin/sh.
+      if (process.platform !== "win32") assert.equal(resolveShell(), true);
+    } finally {
+      if (before === undefined) delete process.env.GEMINI_CODE_SHELL;
+      else process.env.GEMINI_CODE_SHELL = before;
+    }
+  });
+
+  await test("run_bash tells the model which shell and OS it's in", () => {
+    // On Windows that's the difference between writing bash and cmd syntax.
+    assert.match(bashTool.description, new RegExp(`on ${process.platform}`));
+    assert.match(bashTool.description, /shell: /);
   });
 
   await test("check_output lists processes and rejects unknown ids", async () => {
@@ -606,6 +654,22 @@ async function main() {
     const bad = await searchCodeTool.run({ pattern: "([unclosed" });
     assert.equal(bad.ok, false);
     assert.match(bad.output, /invalid regular expression/);
+  });
+
+  await test("search_code globs match paths as well as filenames", async () => {
+    // A real Gemini run used "src/components/*.vue" and got "searched 0
+    // files", because the glob was only ever tested against the basename.
+    const byPath = await searchCodeTool.run({ pattern: "looksLikeAbandonedWork", glob: "src/agent/*.ts" });
+    assert.match(byPath.output, /toolCallParser\.ts:\d+/);
+    const deep = await searchCodeTool.run({ pattern: "looksLikeAbandonedWork", glob: "src/**/*.ts" });
+    assert.match(deep.output, /toolCallParser\.ts:\d+/);
+    const wrongDir = await searchCodeTool.run({ pattern: "looksLikeAbandonedWork", glob: "src/tools/*.ts" });
+    assert.ok(!/toolCallParser\.ts/.test(wrongDir.output), "must not match outside the given directory");
+
+    assert.ok(globToRegExp("*.{ts,vue}").test("App.vue"));
+    assert.ok(!globToRegExp("*.{ts,vue}").test("a,b.js"));
+    assert.ok(globToRegExp("./src/**/x.ts").test("src/x.ts"), "** matches zero directories");
+    assert.ok(!globToRegExp("src/*.ts").test("src/a/b.ts"), "* stays within one segment");
   });
 
   await test("git_status and git_diff report on the working tree", async () => {
