@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import readline from "node:readline/promises";
+import { emitKeypressEvents } from "node:readline";
 import path from "node:path";
 import { GeminiDriver } from "./driver/GeminiDriver.js";
 import { AgentSession } from "./agent/loop.js";
@@ -31,7 +32,7 @@ import { existsSync } from "node:fs";
 const ORCHESTRATOR_MODE = process.env.GEMINI_CODE_ORCHESTRATOR !== "0";
 
 /** Kept in step with package.json by `npm version`. */
-export const VERSION = "0.4.3";
+export const VERSION = "0.4.4";
 import { openChrome, ensureChromeRunning } from "./scripts/openChrome.js";
 import { checkLogin } from "./scripts/login.js";
 import { c } from "./ui/format.js";
@@ -262,6 +263,22 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
   };
 
   if (process.stdin.isTTY) {
+    // Raw mode is what makes Ctrl+V reach us at all. Without it the terminal
+    // keeps its own line discipline, where Ctrl+V is the "literal next"
+    // key (VLNEXT): the terminal swallows it to escape the FOLLOWING
+    // keystroke, and the process never sees it. Verified in a real pty —
+    // ordinary letters arrived, Ctrl+V never did, so paste looked dead while
+    // /paste worked fine.
+    emitKeypressEvents(process.stdin, rl);
+    process.stdin.setRawMode(true);
+    // Raw mode also stops the kernel turning Ctrl+C into SIGINT, so readline
+    // reports it instead — without this, Ctrl+C would no longer quit.
+    rl.on("SIGINT", () => void onSignal());
+    // Leave the terminal usable if we exit while it's in raw mode.
+    process.on("exit", () => {
+      if (process.stdin.isTTY) process.stdin.setRawMode(false);
+    });
+
     process.stdin.on("keypress", (_str, key) => {
       if (key?.ctrl && key.name === "v") void onPasteKey();
     });
