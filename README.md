@@ -157,6 +157,7 @@ GEMINI-PLAN.md
 | Nothing sends / `no new response ever appeared` | Gemini's markup changed; recalibrate [`src/driver/selectors.ts`](src/driver/selectors.ts) |
 | Replies but takes no action | Protocol drift in a long thread — `/clear` starts a fresh one |
 | Windows: commands fail on `ls`, `rm -rf`, `grep` | No Git Bash found, so they ran in cmd.exe. Install [Git for Windows](https://git-scm.com/download/win) or set `GEMINI_CODE_SHELL` |
+| `Ctrl+V` does nothing | Your terminal keeps Ctrl+V for its own paste (usual on Windows Terminal and some Linux setups). Type `/paste` instead — same thing |
 
 ### Why there's no single-file binary
 
@@ -228,7 +229,7 @@ Type a task. `/help` lists commands. `exit` quits.
 | `/plan`, `/plan clear` | show / delete the progress journal |
 | `/memory`, `/remember <note>` | show / append durable project memory |
 | `/clear` | start a fresh Gemini thread |
-| `Ctrl+V` or `/paste` | attach an image from the clipboard (macOS) |
+| `Ctrl+V` or `/paste` | attach an image from the clipboard (macOS, Windows, Linux) |
 | `/image <path>` | attach an image file — or just drag one into the terminal |
 | `/tools` | list tools available to Gemini |
 | `/exit` | quit |
@@ -297,6 +298,9 @@ Gemini can see things, two ways:
   clipboard *text* to the process, so an image paste arrives as nothing at all and
   there's no keystroke to hook. Ctrl+V does reach the program, so that's the
   binding — same reason Claude Code uses it.
+
+  If your terminal claims Ctrl+V for its own paste (Windows Terminal does, and so do
+  some Linux setups), `/paste` does exactly the same thing.
 - **It searches** — `web_search` returns titles, URLs and snippets (DuckDuckGo's
   HTML endpoint: no API key, and not Google, which blocks automated requests).
   For a package's current version, fetching the registry directly is more
