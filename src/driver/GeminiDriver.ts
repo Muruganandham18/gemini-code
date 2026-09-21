@@ -150,14 +150,6 @@ export class GeminiDriver implements IGeminiDriver {
   }
 
   /**
-   * Attaches to a Chrome window YOU already launched and signed into by
-   * hand (see `npm run open-chrome` / README) — a completely normal,
-   * unmodified, human-driven sign-in, so Google's automation detection
-   * never enters the picture. Everything after this point (sending
-   * prompts, reading responses) is automated as usual; only the
-   * security-sensitive login step is deliberately kept manual.
-   */
-  /**
    * The Gem this driver is talking to, if any. Held because it has to be
    * re-entered: a Gem lives in the URL, so "New chat" leaves it, and each
    * worker tab starts outside it unless told otherwise.
@@ -238,11 +230,52 @@ export class GeminiDriver implements IGeminiDriver {
     return match.gem;
   }
 
+  /** Resolves a name or id against the account's Gems, without switching to it. */
+  async findGem(idOrName: string): Promise<Gem> {
+    const match = resolveGem(idOrName, await this.listGems());
+    if (!match.ok) throw new Error(match.error);
+    return match.gem;
+  }
+
+  /**
+   * Opens a separate tab that sits inside a Gem, for consulting it while the
+   * main thread stays an ordinary Gemini chat (see tools/askGem.ts).
+   */
+  async spawnGemTab(gem: Gem): Promise<GeminiDriver> {
+    const context = this.context;
+    if (!context) throw new Error("Cannot open a Gem tab before attach()/launch().");
+
+    const page = await context.newPage();
+    await page.goto(gemChatUrl(gem.id), { waitUntil: "domcontentloaded" });
+
+    const child = new GeminiDriver();
+    child.context = context;
+    child.page = page;
+    child.ownsBrowser = false;
+    child.ownsPage = true;
+    child.gem = gem;
+    await child.waitForAppShell();
+    await child.claimTab(page);
+    await child.markTab(`💎 gemini-code · gem: ${gem.name}`, { guardClose: true });
+    if (!page.url().includes(`/gem/${gem.id}`)) {
+      throw new Error(`Opened a tab for Gem "${gem.name}" but landed on ${page.url()}.`);
+    }
+    return child;
+  }
+
   /** Leaves the Gem; later threads are ordinary Gemini chats again. */
   async clearGem(): Promise<void> {
     this.gem = undefined;
   }
 
+  /**
+   * Attaches to a Chrome window YOU already launched and signed into by
+   * hand (see `npm run open-chrome` / README) — a completely normal,
+   * unmodified, human-driven sign-in, so Google's automation detection
+   * never enters the picture. Everything after this point (sending
+   * prompts, reading responses) is automated as usual; only the
+   * security-sensitive login step is deliberately kept manual.
+   */
   async attach(cdpUrl = "http://localhost:9222"): Promise<void> {
     const browser = await chromium.connectOverCDP(cdpUrl);
     this.ownsBrowser = false;
