@@ -148,9 +148,8 @@ GEMINI-PLAN.md
 
 ### Using your Gems
 
-If you keep a Gem for a project — its conventions, its architecture, the things you'd
-otherwise re-explain every session — point gemini-code at it and every turn carries
-that knowledge:
+If you keep a Gem for a project — its conventions, its architecture, the decisions
+you'd otherwise re-explain every session — point gemini-code at it:
 
 ```bash
 gemini-code --gem "Kite 2"          # by name (a unique part of the name is enough)
@@ -158,21 +157,44 @@ gemini-code --gem coding-partner    # or by the id in the Gem's URL
 GEMINI_CODE_GEM="Kite 2" gemini-code
 ```
 
-Mid-session, `/gems` lists what the account has and `/gem <name>` switches into one;
-`/gem off` goes back to plain Gemini. Switching starts a fresh thread, because a Gem
-applies to a conversation rather than to a single message.
+The Gem is a **reference, not the driver**. The coding conversation stays an ordinary
+Gemini thread, and the agent gets one extra tool:
+
+```
+ask_gem(question) -> what the Gem says
+```
+
+It uses that when it needs background the files can't tell it — how something is
+normally done here, why a thing is the way it is, which approach fits. The Gem answers
+in its own tab, keeps its history across questions, and never sees your working tree or
+runs anything. The tool's description says so plainly, so the agent reads the code for
+facts about the code and asks the Gem for the reasoning around it.
+
+That separation is deliberate. A Gem's instructions shape every reply, so running the
+whole loop inside one means the Gem is also responsible for following the tool protocol
+— and a conversational Gem answers with prose where a tool call was asked for, costing
+nudge turns. Consulting it keeps each side doing what it's good at.
+
+If you do want the old behaviour, ask for it:
+
+```bash
+gemini-code --gem "Kite 2" --gem-mode inside
+```
+
+Mid-session, `/gems` lists the account's Gems, `/gem <name>` points `ask_gem` at one and
+`/gem off` stops using it. Both start a fresh thread, since the tool list changes.
 
 Worth knowing:
 
-- **Worker tabs join the same Gem.** Otherwise the expertise would apply to the tab
-  that plans and not to the tabs doing the work.
-- **A new thread stays in the Gem.** Gems live in the URL, so the UI's own "New chat"
-  would quietly drop out of one; `/clear` re-enters it instead.
-- **The Gem's instructions sit alongside this tool's protocol**, so a chatty Gem can
-  answer with prose or code where a tool call was asked for. That costs a nudge turn
-  or two while the agent restates the protocol, and is usually worth the context.
-- **A name has to be unambiguous.** "Kite" with both "Kite 2 Backend" and "Kite 2
-  Frontend" on the account is refused, with both names listed, rather than guessed at.
+- **Workers share the one Gem tab.** Questions are queued, so parallel workers can't
+  interleave two prompts in the same thread.
+- **The tab opens on first use** and closes with the session, so a Gem you never ask
+  anything costs nothing.
+- **A failed consult isn't fatal** — the agent is told to carry on from the files.
+- **An ambiguous name is refused, not guessed.** "Kite" with both "Kite 2 Backend" and
+  "Kite 2 Frontend" on the account lists both instead of picking one.
+- **In `inside` mode a new thread stays in the Gem.** Gems live in the URL, so the UI's
+  own "New chat" would quietly drop out of one; `/clear` re-enters it.
 
 ### Troubleshooting
 
@@ -259,7 +281,7 @@ Type a task. `/help` lists commands. `exit` quits.
 | `/memory`, `/remember <note>` | show / append durable project memory |
 | `/clear` | start a fresh Gemini thread |
 | `/gems` | list the Gems on your account |
-| `/gem <name>`, `/gem off` | use a Gem's instructions and knowledge, or stop using one |
+| `/gem <name>`, `/gem off` | consult a Gem for project knowledge, or stop using one |
 | `Ctrl+V` or `/paste` | attach an image from the clipboard (macOS, Windows, Linux) |
 | `/image <path>` | attach an image file — or just drag one into the terminal |
 | `/tools` | list tools available to Gemini |
@@ -273,7 +295,8 @@ Typing **while a task runs** steers it — your text is folded into the next tur
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `GEMINI_CODE_MODEL` | `fast` | `fastest` \| `fast` \| `pro` |
-| `GEMINI_CODE_GEM` | unset | Gem to start in, by name or id (same as `--gem`) |
+| `GEMINI_CODE_GEM` | unset | Gem to consult, by name or id (same as `--gem`) |
+| `GEMINI_CODE_GEM_MODE` | `reference` | `inside` runs the whole session in the Gem |
 | `GEMINI_CODE_ORCHESTRATOR` | `1` | `0` = one tab does everything |
 | `GEMINI_CODE_MAX_WORKERS` | `3` | parallel worker tabs |
 | `GEMINI_CODE_AUTO_APPROVE` | unset | `1` skips all y/N confirmations |

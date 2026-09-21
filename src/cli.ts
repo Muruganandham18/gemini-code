@@ -2,8 +2,8 @@
 import readline from "node:readline/promises";
 import { emitKeypressEvents } from "node:readline";
 import path from "node:path";
-import { GeminiDriver } from "./driver/GeminiDriver.js";
-import { gemFlag } from "./args.js";
+import { GeminiDriver, type Gem } from "./driver/GeminiDriver.js";
+import { gemFlag, gemModeFlag } from "./args.js";
 import { AgentSession } from "./agent/loop.js";
 import { buildProjectTree } from "./context/projectTree.js";
 import { collectProjectDocs } from "./context/projectDocs.js";
@@ -16,6 +16,8 @@ import {
 import { tools } from "./tools/index.js";
 import { killAllBackgroundProcesses } from "./tools/bash.js";
 import { createDelegateTool, MAX_PARALLEL_WORKERS } from "./agent/workers.js";
+import { createAskGemTool } from "./tools/askGem.js";
+import type { ToolDefinition } from "./types.js";
 import { PlanJournal, findResumablePlan, readPlan, clearPlan, PLAN_FILENAME } from "./context/plan.js";
 import { createUpdatePlanTool } from "./tools/updatePlan.js";
 import { createScreenshotTool } from "./tools/screenshot.js";
@@ -33,7 +35,7 @@ import { existsSync } from "node:fs";
 const ORCHESTRATOR_MODE = process.env.GEMINI_CODE_ORCHESTRATOR !== "0";
 
 /** Kept in step with package.json by `npm version`. */
-export const VERSION = "0.5.0";
+export const VERSION = "0.6.0";
 import { openChrome, ensureChromeRunning } from "./scripts/openChrome.js";
 import { checkLogin } from "./scripts/login.js";
 import { c } from "./ui/format.js";
@@ -49,8 +51,8 @@ ${modelHelp()
     .join("\n")}
   ${c.cyan("/thinking on|off")}  extended thinking (slower, deeper)
   ${c.cyan("/gems")}             list the Gems on your account
-  ${c.cyan("/gem <name>")}       use a Gem's instructions and knowledge
-  ${c.cyan("/gem off")}          go back to plain Gemini
+  ${c.cyan("/gem <name>")}       consult a Gem for project knowledge (ask_gem)
+  ${c.cyan("/gem off")}          stop using a Gem
   ${c.cyan("/clear")}            start a fresh conversation thread
   ${c.cyan("/paste")} or ${c.cyan("Ctrl+V")}  attach an image from the clipboard
   ${c.cyan("/image <path>")}     attach an image file (or just drag one in)
@@ -90,13 +92,31 @@ async function main() {
   // it navigates, which a beforeunload prompt would interfere with).
   await driver.markTab("🤖 gemini-code · main");
 
-  // A Gem carries its own instructions and knowledge, so it has to be entered
-  // before the thread starts. Failing to enter one is a warning, not a dead
-  // session — the run still works, just without the Gem.
+  // A Gem is REFERENCE by default: the coding thread stays a plain Gemini chat
+  // and the agent consults the Gem through ask_gem when it needs project
+  // background. Running the whole session inside the Gem (--gem-mode inside)
+  // hands every turn to the Gem's own instructions too, which is rarely what
+  // you want from a Gem that exists to answer questions.
+  //
+  // Either way, failing to find the Gem is a warning, not a dead session.
   const wantedGem = gemFlag(process.argv.slice(2)) ?? process.env.GEMINI_CODE_GEM;
+  const gemMode = gemModeFlag(process.argv.slice(2));
+  let gemConsultant: { tool: ToolDefinition; close: () => Promise<void> } | undefined;
+  let referenceGem: Gem | undefined;
   if (wantedGem) {
     try {
-      await driver.useGem(wantedGem);
+      if (gemMode === "inside") {
+        await driver.useGem(wantedGem);
+      } else {
+        // Resolved up front so a wrong name fails now, not mid-task, and so
+        // the banner can name it. The tab itself opens on first use.
+        referenceGem = await driver.findGem(wantedGem);
+        gemConsultant = createAskGemTool({
+          gem: referenceGem,
+          openTab: () => driver.spawnGemTab(referenceGem!),
+          log: (msg) => console.log(c.dim(msg)),
+        });
+      }
     } catch (err) {
       console.log(c.yellow(`Couldn't use Gem "${wantedGem}": ${(err as Error).message.split("\n")[0]}`));
     }
@@ -122,9 +142,15 @@ async function main() {
 ${c.magenta("✻")} ${c.bold("gemini-code")} ${c.dim(`v${VERSION} — Claude-Code-style agent on the Gemini web UI`)}
 
   ${c.dim("cwd")}     ${path.basename(process.cwd())}
-  ${c.dim("model")}   ${modelName}${driver.currentGem ? `\n  ${c.dim("gem")}     ${driver.currentGem.name}` : ""}
+  ${c.dim("model")}   ${modelName}${
+    driver.currentGem
+      ? `\n  ${c.dim("gem")}     ${driver.currentGem.name} ${c.dim("(the whole session runs inside it)")}`
+      : referenceGem
+        ? `\n  ${c.dim("gem")}     ${referenceGem.name} ${c.dim("(reference — ask_gem consults it)")}`
+        : ""
+  }
   ${c.dim("context")} project tree (${tree.split("\n").length} lines)${memory ? `, ${MEMORY_FILENAME}` : ""}${docs.length ? `, ${docs.length} doc${docs.length > 1 ? "s" : ""} (${docs.map((d) => d.path).join(", ")})` : ""}
-  ${c.dim("tools")}   ${[...tools.map((t) => t.name), "delegate_tasks", "update_plan", "screenshot_page", "read_page", "browser_open", "browser_do"].join(", ")}
+  ${c.dim("tools")}   ${[...tools.map((t) => t.name), "delegate_tasks", "update_plan", "screenshot_page", "read_page", "browser_open", "browser_do", ...(gemConsultant ? ["ask_gem"] : [])].join(", ")}
   ${c.dim("workers")} up to ${MAX_PARALLEL_WORKERS} parallel Gemini tabs
   ${c.dim("mode")}    ${ORCHESTRATOR_MODE ? "orchestrator — main tab plans & validates, workers implement" : "solo — one tab does everything"}
 ${created ? `\n  ${c.green("✓")} created ${MEMORY_FILENAME} for durable project memory` : ""}${
@@ -158,6 +184,10 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
             createScreenshotTool(workerDriver),
             createBrowsePageTool(workerDriver),
             ...createBrowserTools(workerDriver),
+            // Workers share the ONE Gem tab (questions are queued inside the
+            // tool): they need the project's conventions more than the
+            // planning tab does.
+            ...(gemConsultant ? [gemConsultant.tool] : []),
           ],
           undefined,
           "worker"
@@ -172,6 +202,7 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
         createScreenshotTool(driver),
         createBrowsePageTool(driver),
         ...createBrowserTools(driver),
+        ...(gemConsultant ? [gemConsultant.tool] : []),
       ],
       journal,
       ORCHESTRATOR_MODE ? "orchestrator" : "solo"
@@ -193,6 +224,7 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
   // next run knows there's work to pick up.
   const onSignal = async () => {
     await journal.markInterrupted("session terminated");
+    await gemConsultant?.close();
     // Don't leave a dev server holding its port after we're gone.
     killAllBackgroundProcesses();
     process.exit(130);
@@ -364,7 +396,8 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
                 }
                 console.log(`  ${c.bold("Gems")} ${c.dim("(use with /gem <name>)")}`);
                 for (const g of gems) {
-                  const mark = driver.currentGem?.id === g.id ? c.green(" ← in use") : "";
+                  const active = driver.currentGem?.id === g.id || referenceGem?.id === g.id;
+                  const mark = active ? c.green(" ← in use") : "";
                   console.log(`    ${c.cyan(g.name)} ${c.dim(g.id)}${mark}`);
                 }
                 console.log("");
@@ -376,26 +409,49 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
 
             case "gem": {
               if (!arg) {
+                const active = driver.currentGem ?? referenceGem;
                 console.log(
-                  driver.currentGem
-                    ? `  ${c.green("✓")} using Gem ${c.bold(driver.currentGem.name)}\n`
+                  active
+                    ? `  ${c.green("✓")} Gem ${c.bold(active.name)} ${c.dim(
+                        driver.currentGem ? "(the whole session runs inside it)" : "(reference — ask_gem consults it)"
+                      )}\n`
                     : `  ${c.dim("no Gem in use — /gems lists them, /gem <name> picks one")}\n`
                 );
                 break;
               }
               if (/^(off|none|clear)$/i.test(arg)) {
+                await gemConsultant?.close();
+                gemConsultant = undefined;
+                referenceGem = undefined;
                 await driver.clearGem();
                 await driver.newConversation();
                 session = makeMainSession(await readMemory());
-                console.log(`  ${c.green("✓")} back to plain Gemini ${c.dim("(fresh thread)")}\n`);
+                console.log(`  ${c.green("✓")} no Gem in use ${c.dim("(fresh thread)")}\n`);
                 break;
               }
               try {
-                const gem = await driver.useGem(arg);
-                // Entering a Gem starts a new thread, which has never seen
-                // the primer — a new session re-sends it.
+                if (gemMode === "inside") {
+                  const gem = await driver.useGem(arg);
+                  console.log(`  ${c.green("✓")} session now runs inside Gem ${c.bold(gem.name)}\n`);
+                } else {
+                  const gem = await driver.findGem(arg);
+                  // Drop the previous Gem's tab before pointing at another,
+                  // or its thread lingers with nothing using it.
+                  await gemConsultant?.close();
+                  referenceGem = gem;
+                  gemConsultant = createAskGemTool({
+                    gem,
+                    openTab: () => driver.spawnGemTab(gem),
+                    log: (msg) => console.log(c.dim(msg)),
+                  });
+                  console.log(
+                    `  ${c.green("✓")} ask_gem now consults ${c.bold(gem.name)} ${c.dim("(reference only)")}\n`
+                  );
+                }
+                // The tool list changed and a Gem applies per thread, so the
+                // next task needs a fresh thread and a re-sent primer.
+                await driver.newConversation();
                 session = makeMainSession(await readMemory());
-                console.log(`  ${c.green("✓")} using Gem ${c.bold(gem.name)} ${c.dim("(fresh thread)")}\n`);
               } catch (err) {
                 console.log(`  ${c.red("couldn't use that Gem")}: ${(err as Error).message.split("\n")[0]}\n`);
               }
@@ -526,6 +582,8 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
     }
   } finally {
     setAsker(undefined);
+    // Close the Gem's tab with the session that opened it.
+    await gemConsultant?.close();
     rl.close();
     killAllBackgroundProcesses();
     await driver.close();
@@ -536,7 +594,9 @@ const USAGE = `gemini-code — a Claude-Code-style agent on the Gemini web UI
 
 Usage:
   gemini-code                 start the agent in the current directory
-  gemini-code --gem <name>    start inside one of your Gems (by name or id)
+  gemini-code --gem <name>    consult one of your Gems for project knowledge (ask_gem)
+  gemini-code --gem <name> --gem-mode inside
+                              run the whole session inside the Gem instead
   gemini-code open-chrome     open a normal Chrome window to sign into (do this first)
   gemini-code login           check that the signed-in Chrome is reachable
   gemini-code --help          this message
@@ -557,6 +617,7 @@ async function cli(): Promise<void> {
       return main();
     // Flags belong to the default (agent) mode, not to a subcommand.
     case "--gem":
+    case "--gem-mode":
       return main();
     case "open-chrome":
       return void openChrome();
@@ -573,7 +634,7 @@ async function cli(): Promise<void> {
       return;
     }
     default:
-      if (cmd.startsWith("--gem=")) return main();
+      if (cmd.startsWith("--gem=") || cmd.startsWith("--gem-mode=")) return main();
       console.error(`Unknown command "${cmd}"\n\n${USAGE}`);
       process.exitCode = 1;
   }

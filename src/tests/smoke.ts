@@ -25,7 +25,8 @@ import { fetchUrlTool } from "../tools/fetchUrl.js";
 import { webSearchTool, parseResults } from "../tools/webSearch.js";
 import { resolveModel, DEFAULT_MODEL_ALIAS, EXTENDED_THINKING } from "../driver/models.js";
 import { resolveGem } from "../driver/GeminiDriver.js";
-import { gemFlag } from "../args.js";
+import { createAskGemTool } from "../tools/askGem.js";
+import { gemFlag, gemModeFlag } from "../args.js";
 import { buildProjectTree } from "../context/projectTree.js";
 import { ensureMemoryFile, appendMemory, readMemory, MEMORY_FILENAME } from "../context/memory.js";
 import { collectProjectDocs } from "../context/projectDocs.js";
@@ -1178,6 +1179,65 @@ async function main() {
     if (!missing.ok) assert.match(missing.error, /No Gem matching "nope".*Available/s);
 
     assert.equal(resolveGem("   ", gems).ok, false);
+  });
+
+  await test("a Gem is reference by default, inside only when asked", () => {
+    assert.equal(gemModeFlag([], undefined), "reference");
+    assert.equal(gemModeFlag(["--gem", "Kite 2"], undefined), "reference");
+    assert.equal(gemModeFlag(["--gem-mode", "inside"], undefined), "inside");
+    assert.equal(gemModeFlag(["--gem-mode=inside"], undefined), "inside");
+    assert.equal(gemModeFlag([], "inside"), "inside", "env works too");
+    assert.equal(gemModeFlag([], "nonsense"), "reference", "anything unrecognised stays reference");
+    assert.equal(gemModeFlag(["--gem-mode", "inside"], "reference"), "inside", "the flag beats the env");
+  });
+
+  await test("ask_gem relays the Gem's answer, and opens its tab only once", async () => {
+    const asked: string[] = [];
+    let opens = 0;
+    const fakeTab = {
+      async sendPrompt(text: string) {
+        asked.push(text);
+      },
+      async waitForResponseComplete() {},
+      async getLastResponse() {
+        return { text: `answer to ${asked.length}`, codeBlocks: [] };
+      },
+      async close() {},
+    };
+    const consultant = createAskGemTool({
+      gem: { id: "a1", name: "Kite 2" },
+      openTab: async () => {
+        opens++;
+        return fakeTab as never;
+      },
+    });
+
+    const first = await consultant.tool.run({ question: "Which state library do we use?" });
+    assert.equal(first.ok, true);
+    assert.match(first.output, /Kite 2.*says/s);
+    assert.match(first.output, /answer to 1/);
+
+    await consultant.tool.run({ question: "and why?" });
+    assert.equal(opens, 1, "the Gem tab is reused, not reopened per question");
+    assert.deepEqual(asked, ["Which state library do we use?", "and why?"]);
+
+    const empty = await consultant.tool.run({ question: "   " });
+    assert.equal(empty.ok, false);
+    assert.match(empty.output, /'question' is required/);
+    await consultant.close();
+  });
+
+  await test("ask_gem failing is recoverable, not fatal", async () => {
+    const consultant = createAskGemTool({
+      gem: { id: "a1", name: "Kite 2" },
+      openTab: async () => {
+        throw new Error("tab blew up");
+      },
+    });
+    const r = await consultant.tool.run({ question: "anything" });
+    assert.equal(r.ok, false);
+    assert.match(r.output, /tab blew up/);
+    assert.match(r.output, /Carry on using the files/);
   });
 
   await test("--gem is read in both spellings", () => {
