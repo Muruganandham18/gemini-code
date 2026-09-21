@@ -146,6 +146,34 @@ Add to the `.gitignore` of any project you run it in:
 GEMINI-PLAN.md
 ```
 
+### Using your Gems
+
+If you keep a Gem for a project — its conventions, its architecture, the things you'd
+otherwise re-explain every session — point gemini-code at it and every turn carries
+that knowledge:
+
+```bash
+gemini-code --gem "Kite 2"          # by name (a unique part of the name is enough)
+gemini-code --gem coding-partner    # or by the id in the Gem's URL
+GEMINI_CODE_GEM="Kite 2" gemini-code
+```
+
+Mid-session, `/gems` lists what the account has and `/gem <name>` switches into one;
+`/gem off` goes back to plain Gemini. Switching starts a fresh thread, because a Gem
+applies to a conversation rather than to a single message.
+
+Worth knowing:
+
+- **Worker tabs join the same Gem.** Otherwise the expertise would apply to the tab
+  that plans and not to the tabs doing the work.
+- **A new thread stays in the Gem.** Gems live in the URL, so the UI's own "New chat"
+  would quietly drop out of one; `/clear` re-enters it instead.
+- **The Gem's instructions sit alongside this tool's protocol**, so a chatty Gem can
+  answer with prose or code where a tool call was asked for. That costs a nudge turn
+  or two while the agent restates the protocol, and is usually worth the context.
+- **A name has to be unambiguous.** "Kite" with both "Kite 2 Backend" and "Kite 2
+  Frontend" on the account is refused, with both names listed, rather than guessed at.
+
 ### Troubleshooting
 
 | Symptom | Cause / fix |
@@ -157,6 +185,7 @@ GEMINI-PLAN.md
 | Nothing sends / `no new response ever appeared` | Gemini's markup changed; recalibrate [`src/driver/selectors.ts`](src/driver/selectors.ts) |
 | Replies but takes no action | Protocol drift in a long thread — `/clear` starts a fresh one |
 | Windows: commands fail on `ls`, `rm -rf`, `grep` | No Git Bash found, so they ran in cmd.exe. Install [Git for Windows](https://git-scm.com/download/win) or set `GEMINI_CODE_SHELL` |
+| `Couldn't use Gem "..."` | Check the exact name with `/gems` — the id from the Gem's URL works too |
 | `Ctrl+V` does nothing | Your terminal keeps Ctrl+V for its own paste (usual on Windows Terminal and some Linux setups). Type `/paste` instead — same thing |
 
 ### Why there's no single-file binary
@@ -229,6 +258,8 @@ Type a task. `/help` lists commands. `exit` quits.
 | `/plan`, `/plan clear` | show / delete the progress journal |
 | `/memory`, `/remember <note>` | show / append durable project memory |
 | `/clear` | start a fresh Gemini thread |
+| `/gems` | list the Gems on your account |
+| `/gem <name>`, `/gem off` | use a Gem's instructions and knowledge, or stop using one |
 | `Ctrl+V` or `/paste` | attach an image from the clipboard (macOS, Windows, Linux) |
 | `/image <path>` | attach an image file — or just drag one into the terminal |
 | `/tools` | list tools available to Gemini |
@@ -242,6 +273,7 @@ Typing **while a task runs** steers it — your text is folded into the next tur
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `GEMINI_CODE_MODEL` | `fast` | `fastest` \| `fast` \| `pro` |
+| `GEMINI_CODE_GEM` | unset | Gem to start in, by name or id (same as `--gem`) |
 | `GEMINI_CODE_ORCHESTRATOR` | `1` | `0` = one tab does everything |
 | `GEMINI_CODE_MAX_WORKERS` | `3` | parallel worker tabs |
 | `GEMINI_CODE_AUTO_APPROVE` | unset | `1` skips all y/N confirmations |

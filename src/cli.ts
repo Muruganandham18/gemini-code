@@ -3,6 +3,7 @@ import readline from "node:readline/promises";
 import { emitKeypressEvents } from "node:readline";
 import path from "node:path";
 import { GeminiDriver } from "./driver/GeminiDriver.js";
+import { gemFlag } from "./args.js";
 import { AgentSession } from "./agent/loop.js";
 import { buildProjectTree } from "./context/projectTree.js";
 import { collectProjectDocs } from "./context/projectDocs.js";
@@ -32,7 +33,7 @@ import { existsSync } from "node:fs";
 const ORCHESTRATOR_MODE = process.env.GEMINI_CODE_ORCHESTRATOR !== "0";
 
 /** Kept in step with package.json by `npm version`. */
-export const VERSION = "0.4.4";
+export const VERSION = "0.5.0";
 import { openChrome, ensureChromeRunning } from "./scripts/openChrome.js";
 import { checkLogin } from "./scripts/login.js";
 import { c } from "./ui/format.js";
@@ -47,6 +48,9 @@ ${modelHelp()
     .map((l) => "  " + l)
     .join("\n")}
   ${c.cyan("/thinking on|off")}  extended thinking (slower, deeper)
+  ${c.cyan("/gems")}             list the Gems on your account
+  ${c.cyan("/gem <name>")}       use a Gem's instructions and knowledge
+  ${c.cyan("/gem off")}          go back to plain Gemini
   ${c.cyan("/clear")}            start a fresh conversation thread
   ${c.cyan("/paste")} or ${c.cyan("Ctrl+V")}  attach an image from the clipboard
   ${c.cyan("/image <path>")}     attach an image file (or just drag one in)
@@ -86,6 +90,18 @@ async function main() {
   // it navigates, which a beforeunload prompt would interfere with).
   await driver.markTab("🤖 gemini-code · main");
 
+  // A Gem carries its own instructions and knowledge, so it has to be entered
+  // before the thread starts. Failing to enter one is a warning, not a dead
+  // session — the run still works, just without the Gem.
+  const wantedGem = gemFlag(process.argv.slice(2)) ?? process.env.GEMINI_CODE_GEM;
+  if (wantedGem) {
+    try {
+      await driver.useGem(wantedGem);
+    } catch (err) {
+      console.log(c.yellow(`Couldn't use Gem "${wantedGem}": ${(err as Error).message.split("\n")[0]}`));
+    }
+  }
+
   await driver.newConversation();
 
   // Default the model (env override: GEMINI_CODE_MODEL=pro npm run dev).
@@ -106,7 +122,7 @@ async function main() {
 ${c.magenta("✻")} ${c.bold("gemini-code")} ${c.dim(`v${VERSION} — Claude-Code-style agent on the Gemini web UI`)}
 
   ${c.dim("cwd")}     ${path.basename(process.cwd())}
-  ${c.dim("model")}   ${modelName}
+  ${c.dim("model")}   ${modelName}${driver.currentGem ? `\n  ${c.dim("gem")}     ${driver.currentGem.name}` : ""}
   ${c.dim("context")} project tree (${tree.split("\n").length} lines)${memory ? `, ${MEMORY_FILENAME}` : ""}${docs.length ? `, ${docs.length} doc${docs.length > 1 ? "s" : ""} (${docs.map((d) => d.path).join(", ")})` : ""}
   ${c.dim("tools")}   ${[...tools.map((t) => t.name), "delegate_tasks", "update_plan", "screenshot_page", "read_page", "browser_open", "browser_do"].join(", ")}
   ${c.dim("workers")} up to ${MAX_PARALLEL_WORKERS} parallel Gemini tabs
@@ -338,6 +354,54 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
               break;
             }
 
+            case "gems": {
+              process.stdout.write(c.dim("  reading your Gems...\r"));
+              try {
+                const gems = await driver.listGems();
+                if (!gems.length) {
+                  console.log(`  ${c.yellow("no Gems found on this account")}\n`);
+                  break;
+                }
+                console.log(`  ${c.bold("Gems")} ${c.dim("(use with /gem <name>)")}`);
+                for (const g of gems) {
+                  const mark = driver.currentGem?.id === g.id ? c.green(" ← in use") : "";
+                  console.log(`    ${c.cyan(g.name)} ${c.dim(g.id)}${mark}`);
+                }
+                console.log("");
+              } catch (err) {
+                console.log(`  ${c.red("couldn't list Gems")}: ${(err as Error).message.split("\n")[0]}\n`);
+              }
+              break;
+            }
+
+            case "gem": {
+              if (!arg) {
+                console.log(
+                  driver.currentGem
+                    ? `  ${c.green("✓")} using Gem ${c.bold(driver.currentGem.name)}\n`
+                    : `  ${c.dim("no Gem in use — /gems lists them, /gem <name> picks one")}\n`
+                );
+                break;
+              }
+              if (/^(off|none|clear)$/i.test(arg)) {
+                await driver.clearGem();
+                await driver.newConversation();
+                session = makeMainSession(await readMemory());
+                console.log(`  ${c.green("✓")} back to plain Gemini ${c.dim("(fresh thread)")}\n`);
+                break;
+              }
+              try {
+                const gem = await driver.useGem(arg);
+                // Entering a Gem starts a new thread, which has never seen
+                // the primer — a new session re-sends it.
+                session = makeMainSession(await readMemory());
+                console.log(`  ${c.green("✓")} using Gem ${c.bold(gem.name)} ${c.dim("(fresh thread)")}\n`);
+              } catch (err) {
+                console.log(`  ${c.red("couldn't use that Gem")}: ${(err as Error).message.split("\n")[0]}\n`);
+              }
+              break;
+            }
+
             case "clear":
             case "new":
               await driver.newConversation();
@@ -472,12 +536,14 @@ const USAGE = `gemini-code — a Claude-Code-style agent on the Gemini web UI
 
 Usage:
   gemini-code                 start the agent in the current directory
+  gemini-code --gem <name>    start inside one of your Gems (by name or id)
   gemini-code open-chrome     open a normal Chrome window to sign into (do this first)
   gemini-code login           check that the signed-in Chrome is reachable
   gemini-code --help          this message
 
 Environment:
   GEMINI_CODE_MODEL           fastest | fast (default) | pro
+  GEMINI_CODE_GEM             Gem to start in, by name or id (same as --gem)
   GEMINI_CODE_MAX_WORKERS     parallel worker tabs (default 3)
   GEMINI_CODE_AUTO_APPROVE=1  skip y/N confirmations for writes, shell and network
   GEMINI_CODE_PROFILE         Chrome profile dir (default ~/.gemini-code/profile)
@@ -488,6 +554,9 @@ async function cli(): Promise<void> {
   const cmd = process.argv[2];
   switch (cmd) {
     case undefined:
+      return main();
+    // Flags belong to the default (agent) mode, not to a subcommand.
+    case "--gem":
       return main();
     case "open-chrome":
       return void openChrome();
@@ -504,6 +573,7 @@ async function cli(): Promise<void> {
       return;
     }
     default:
+      if (cmd.startsWith("--gem=")) return main();
       console.error(`Unknown command "${cmd}"\n\n${USAGE}`);
       process.exitCode = 1;
   }

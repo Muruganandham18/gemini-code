@@ -7,6 +7,49 @@ import type { IGeminiDriver, GeminiResponse } from "./IGeminiDriver.js";
 import { resolveModel, modelHelp, EXTENDED_THINKING } from "./models.js";
 
 const GEMINI_URL = "https://gemini.google.com/app";
+const GEMS_URL = "https://gemini.google.com/gems/view";
+const gemChatUrl = (id: string) => `https://gemini.google.com/gem/${id}`;
+
+export interface Gem {
+  /** The id in the URL: a slug for Google's premade Gems, an opaque id for your own. */
+  id: string;
+  name: string;
+}
+
+/**
+ * Picks the Gem a user meant from what they typed: its id, its exact name, or
+ * enough of its name to be unambiguous. Pure so it can be tested without a
+ * browser — the matching, not the clicking, is where the mistakes are.
+ */
+export function resolveGem(
+  input: string,
+  gems: Gem[]
+): { ok: true; gem: Gem } | { ok: false; error: string } {
+  const wanted = input.trim();
+  if (!wanted) return { ok: false, error: "No Gem name given." };
+
+  const byId = gems.find((g) => g.id.toLowerCase() === wanted.toLowerCase());
+  if (byId) return { ok: true, gem: byId };
+
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+  const exact = gems.filter((g) => norm(g.name) === norm(wanted));
+  if (exact.length === 1) return { ok: true, gem: exact[0] };
+
+  const partial = gems.filter((g) => norm(g.name).includes(norm(wanted)));
+  if (partial.length === 1) return { ok: true, gem: partial[0] };
+  if (partial.length > 1) {
+    return {
+      ok: false,
+      error: `"${wanted}" matches several Gems: ${partial.map((g) => g.name).join(", ")}. Be more specific.`,
+    };
+  }
+  return {
+    ok: false,
+    error: gems.length
+      ? `No Gem matching "${wanted}". Available: ${gems.map((g) => g.name).join(", ")}.`
+      : `No Gem matching "${wanted}" — this account has no Gems listed.`,
+  };
+}
 
 /**
  * Timeouts. Generous by default and env-tunable: Gemini can think for a
@@ -114,6 +157,92 @@ export class GeminiDriver implements IGeminiDriver {
    * prompts, reading responses) is automated as usual; only the
    * security-sensitive login step is deliberately kept manual.
    */
+  /**
+   * The Gem this driver is talking to, if any. Held because it has to be
+   * re-entered: a Gem lives in the URL, so "New chat" leaves it, and each
+   * worker tab starts outside it unless told otherwise.
+   */
+  private gem?: Gem;
+
+  /** Where a fresh thread starts: inside the Gem when one is selected. */
+  private homeUrl(): string {
+    return this.gem ? gemChatUrl(this.gem.id) : GEMINI_URL;
+  }
+
+  get currentGem(): Gem | undefined {
+    return this.gem;
+  }
+
+  /**
+   * Lists the Gems on the account (yours and Google's premade ones).
+   *
+   * Reads them in a throwaway tab: the Gems list is its own page, so loading
+   * it in the working tab would abandon the conversation in progress.
+   */
+  async listGems(): Promise<Gem[]> {
+    const context = this.context;
+    if (!context) throw new Error("Cannot list Gems before attach()/launch().");
+
+    const page = await context.newPage();
+    try {
+      await page.goto(GEMS_URL, { waitUntil: "domcontentloaded" });
+      // The list renders client-side; wait for the first link rather than a
+      // fixed sleep, but don't fail the whole call if there are none.
+      await page.locator(selectors.gemLink).first().waitFor({ timeout: 20_000 }).catch(() => undefined);
+      // A Gem card reads as up to three lines — an optional badge
+      // ("Experiment"), the name, then the description — so the name is the
+      // first line that isn't a badge. This note lives out here on purpose:
+      // the injected script is one line to the page, and an escaped newline
+      // inside a // comment in it truncated everything after it.
+      const raw = await page.evaluate(`(() => {
+        const out = [];
+        for (const a of document.querySelectorAll('a[href^="/gem/"]')) {
+          const id = (a.getAttribute("href") || "").replace("/gem/", "").trim();
+          const lines = (a.innerText || "")
+            .split(String.fromCharCode(10))
+            .map((l) => l.trim())
+            .filter(Boolean)
+            .filter((l) => !/^(experiment|new|premade)$/i.test(l));
+          if (id && lines.length) out.push({ id, name: lines[0] });
+        }
+        return out;
+      })()`) as Gem[];
+
+      // De-duplicate: a Gem can appear both as a card and in a shortcut row.
+      const seen = new Map<string, Gem>();
+      for (const g of raw) if (!seen.has(g.id)) seen.set(g.id, g);
+      return [...seen.values()];
+    } finally {
+      await page.close().catch(() => undefined);
+    }
+  }
+
+  /**
+   * Switches this tab into a Gem, so every later prompt carries the Gem's own
+   * instructions and knowledge. Accepts an id or a name.
+   */
+  async useGem(idOrName: string): Promise<Gem> {
+    const page = this.requirePage();
+    const gems = await this.listGems();
+    const match = resolveGem(idOrName, gems);
+    if (!match.ok) throw new Error(match.error);
+
+    await page.goto(gemChatUrl(match.gem.id), { waitUntil: "domcontentloaded" });
+    await this.waitForAppShell();
+    if (!page.url().includes(`/gem/${match.gem.id}`)) {
+      throw new Error(
+        `Opened the Gem "${match.gem.name}" but ended up at ${page.url()} — it may have been deleted.`
+      );
+    }
+    this.gem = match.gem;
+    return match.gem;
+  }
+
+  /** Leaves the Gem; later threads are ordinary Gemini chats again. */
+  async clearGem(): Promise<void> {
+    this.gem = undefined;
+  }
+
   async attach(cdpUrl = "http://localhost:9222"): Promise<void> {
     const browser = await chromium.connectOverCDP(cdpUrl);
     this.ownsBrowser = false;
@@ -343,6 +472,15 @@ export class GeminiDriver implements IGeminiDriver {
 
   async newConversation(): Promise<void> {
     const page = this.requirePage();
+    // Inside a Gem, "New chat" drops back to a plain Gemini thread and the
+    // Gem's expertise silently stops applying. Re-open the Gem's own URL
+    // instead, which starts a fresh thread that is still in the Gem.
+    if (this.gem) {
+      await page.goto(gemChatUrl(this.gem.id), { waitUntil: "domcontentloaded" });
+      await this.waitForAppShell();
+      await this.waitForResponsesCleared();
+      return;
+    }
     const newChat = page.locator(`${selectors.newChatButton} >> visible=true`).first();
     if (await newChat.isVisible().catch(() => false)) {
       await newChat.click();
@@ -802,11 +940,14 @@ export class GeminiDriver implements IGeminiDriver {
     if (!context) throw new Error("Cannot spawn a tab before attach()/launch().");
 
     const page = await context.newPage();
-    await page.goto(GEMINI_URL, { waitUntil: "domcontentloaded" });
+    // Workers open inside the same Gem as the parent, or its expertise would
+    // apply to the planning tab and not to the tabs doing the work.
+    await page.goto(this.homeUrl(), { waitUntil: "domcontentloaded" });
 
     const child = new GeminiDriver();
     child.context = context;
     child.page = page;
+    child.gem = this.gem;
     child.ownsBrowser = false;
     // We created this page, so this child closes the page — but never the
     // shared browser or the CDP connection the parent owns.
