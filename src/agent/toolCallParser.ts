@@ -11,6 +11,49 @@ export type ParseResult =
   | { kind: "final"; text: string }
   | { kind: "malformed"; raw: string; error: string };
 
+/**
+ * Every balanced {...} substring in a blob of text, parsed where possible.
+ *
+ * Quote-aware: a brace inside a JSON string ("{"command": "echo {}"}") must
+ * not end the object. Used for the last-resort scan of prose, where Gemini
+ * has written the call as a sentence instead of a code block.
+ */
+function extractJsonObjects(raw: string): unknown[] {
+  const found: unknown[] = [];
+  for (let start = 0; start < raw.length; start++) {
+    if (raw[start] !== "{") continue;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = start; i < raw.length; i++) {
+      const ch = raw[i];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\" && inString) {
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') inString = !inString;
+      else if (!inString && ch === "{") depth++;
+      else if (!inString && ch === "}") {
+        depth--;
+        if (depth === 0) {
+          try {
+            found.push(JSON.parse(raw.slice(start, i + 1)));
+          } catch {
+            // Not JSON after all — keep scanning from the next brace.
+          }
+          start = i;
+          break;
+        }
+      }
+    }
+  }
+  return found;
+}
+
 /** Finds the first balanced {...} substring and parses it, ignoring any surrounding text. */
 function extractJsonObject(raw: string): unknown {
   const start = raw.indexOf("{");
@@ -79,6 +122,18 @@ export function parseGeminiReply(response: GeminiResponse, knownTools?: Readonly
     }
   }
 
+  // Last resort: the call written as prose rather than as a code block
+  // ("I'll call {"name": "read_file", "args": {"path": "x"}} now"). The UI
+  // renders that as ordinary text, so codeBlocks is empty and the loop used
+  // to accept the whole thing as a finished answer and stop. Only accepted
+  // for a name that IS a tool, so prose that merely contains JSON stays prose.
+  if (knownTools?.size) {
+    for (const candidate of extractJsonObjects(response.text)) {
+      const call = asToolCall(candidate, knownTools);
+      if (call && knownTools.has(call.name)) return { kind: "tool_call", call };
+    }
+  }
+
   // No valid tool call found, but if something looks like an attempt at one
   // (has the shape of our tool-call JSON without being valid/complete),
   // treat it as malformed so the loop asks Gemini to retry, rather than
@@ -112,9 +167,22 @@ export function parseGeminiReply(response: GeminiResponse, knownTools?: Readonly
  * perform with a tool.
  */
 export function looksLikeAbandonedWork(response: GeminiResponse): boolean {
-  if (response.codeBlocks.length === 0) return false;
-  return /\b(i'?ll |i will |let me |i'?m going to |here'?s the (code|file|script)|you can (run|save|copy)|create the file|save (this|it) (to|as)|add the following)/i.test(
-    response.text
+  const text = response.text;
+  if (response.codeBlocks.length > 0) {
+    return /\b(i'?ll |i will |let me |i'?m going to |here'?s the (code|file|script)|you can (run|save|copy)|create the file|save (this|it) (to|as)|add the following)/i.test(
+      text
+    );
+  }
+
+  // Prose with no code at all can abandon the work just as completely, in two
+  // ways seen in real threads: asking permission to start ("Would you like me
+  // to proceed?") and narrating an action as if it had happened ("I'll now
+  // update the file"). Both end the task having changed nothing. Asking is
+  // pointless here — approval is the user's y/N gate, not Gemini's to seek.
+  return /\b(would you like me to|shall i|do you want me to|let me know (if|when|whether)|if you'?d like,? i can|i can (do|make|create|write|implement) (that|this|it)|say the word)\b/i.test(
+    text
+  ) || /\b(i'?ll |i will |let me |i'?m going to )(now )?(create|write|update|edit|modify|add|run|execute|fix|implement|start|begin)\b/i.test(
+    text
   );
 }
 
