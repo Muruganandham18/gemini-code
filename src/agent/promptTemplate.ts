@@ -185,5 +185,15 @@ export function formatToolResult(output: string): string {
 export function buildProtocolReminder(): string {
   return `REMINDER — you are driving tools, not chatting. To act, reply with ONLY a code block containing:
 {"name": "<tool_name>", "args": { ... }}
-and nothing else. Do not paste file contents as an answer; write them with write_file. If the task really is finished, reply in plain prose with NO code block.`;
+and nothing else. For example, to change a file:
+{"name": "edit_file", "args": {"path": "src/app.py", "old_text": "debug=True", "new_text": "debug=False"}}
+
+Rules that keep being broken:
+- Do NOT describe what you are about to do. The tool call IS the action.
+- Do NOT paste file contents for me to save; write them with write_file.
+- Do NOT ask for permission or offer to continue — you already have it, and the
+  user is asked to approve writes and commands separately. Just make the call.
+- The JSON goes in a code block on its own, with no prose around it.
+
+Reply in plain prose with NO code block only when the work is genuinely finished.`;
 }

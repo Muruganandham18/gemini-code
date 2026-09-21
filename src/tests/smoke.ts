@@ -105,6 +105,10 @@ async function main() {
   // This whole suite is non-interactive (no TTY on stdin), so auto-approve
   // the confirm gates that write_file/run_bash would otherwise block on.
   process.env.GEMINI_CODE_AUTO_APPROVE = "1";
+  // Most loop tests script one reply per turn and assert on it. The
+  // no-tool-call backstop adds a turn to any task that never calls a tool, so
+  // it's off by default here and switched on by the tests that cover it.
+  process.env.GEMINI_CODE_IDLE_NUDGES = "0";
 
   console.log("Parser:");
   await test("parses a tool call out of a rendered code block", () => {
@@ -232,6 +236,81 @@ async function main() {
     assert.equal(answer, "Created it.", "must recover rather than ending with nothing done");
     assert.match(driver.sentMessages[1], /REMINDER/, "should restate the contract");
     assert.equal(driver.sentMessages.length, 3);
+  });
+
+  await test("finds a tool call written as prose, not as a code block", async () => {
+    // A real complaint: "tool calls are not working, the response looks
+    // normal". Gemini wrote the JSON as a sentence, so codeBlocks was empty
+    // and the whole thing was accepted as a finished answer.
+    const driver = new FakeDriver([
+      {
+        text: 'Sure — I will call {"name": "read_file", "args": {"path": "package.json"}} to check.',
+        codeBlocks: [],
+      },
+      finalResponse("It is version 1.0.0."),
+    ]);
+    const answer = await new AgentSession(driver).runTask("what version is this?");
+    assert.equal(answer, "It is version 1.0.0.");
+    assert.match(driver.sentMessages[1], /TOOL_RESULT/, "the call must actually run");
+  });
+
+  await test("prose naming no tool stays a final answer", async () => {
+    // The scan must not turn ordinary JSON in an answer into a tool call.
+    const driver = new FakeDriver([
+      finalResponse('The config is {"name": "my-app", "version": "2.0.0"} and that is all.'),
+    ]);
+    const answer = await new AgentSession(driver).runTask("what is in the config?");
+    assert.match(answer, /my-app/);
+    assert.equal(driver.sentMessages.length, 1, "no nudge, no tool call");
+  });
+
+  await test("a task that ends with no tool call at all is pushed to act", async () => {
+    process.env.GEMINI_CODE_IDLE_NUDGES = "1";
+    try {
+      const driver = new FakeDriver([
+        // Nothing here matches the drift wordings — the backstop is the only
+        // thing that catches it.
+        finalResponse("The fix would be to change the timeout in config.py."),
+        toolCallResponse("write_file", { path: ".tmp-test/idle.txt", content: "done" }),
+        finalResponse("Changed it."),
+      ]);
+      const answer = await new AgentSession(driver).runTask("fix the timeout");
+      assert.equal(answer, "Changed it.");
+      assert.match(driver.sentMessages[1], /without using a single tool/);
+    } finally {
+      process.env.GEMINI_CODE_IDLE_NUDGES = "0";
+    }
+  });
+
+  await test("the backstop gives up after one try, so a question still gets answered", async () => {
+    process.env.GEMINI_CODE_IDLE_NUDGES = "1";
+    try {
+      const driver = new FakeDriver([
+        finalResponse("It uses PostgreSQL."),
+        finalResponse("It uses PostgreSQL. That is the whole answer."),
+      ]);
+      const answer = await new AgentSession(driver).runTask("which database?");
+      assert.match(answer, /PostgreSQL/);
+      assert.equal(driver.sentMessages.length, 2, "nudged once, then accepted");
+    } finally {
+      process.env.GEMINI_CODE_IDLE_NUDGES = "0";
+    }
+  });
+
+  await test("asking permission instead of acting counts as drift", () => {
+    assert.equal(
+      looksLikeAbandonedWork({ text: "Would you like me to update the config?", codeBlocks: [] }),
+      true
+    );
+    assert.equal(
+      looksLikeAbandonedWork({ text: "I'll now update the timeout in config.py.", codeBlocks: [] }),
+      true
+    );
+    assert.equal(
+      looksLikeAbandonedWork({ text: "The timeout is set in config.py, line 12.", codeBlocks: [] }),
+      false,
+      "a plain factual answer is not drift"
+    );
   });
 
   await test("gives up nudging so it can't loop forever on a real answer", async () => {

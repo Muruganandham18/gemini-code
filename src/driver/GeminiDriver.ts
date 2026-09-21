@@ -589,14 +589,34 @@ export class GeminiDriver implements IGeminiDriver {
       await this.attachFile(file);
     }
 
-    // insertText types the literal string (newlines included) without firing
-    // Enter keydowns, so multi-line prompts don't submit themselves early.
-    //
     // Guard: a message that STARTS with a ``` fence flips the composer into
     // code-block mode, where Enter inserts a newline instead of submitting
     // and the send button can't rescue it — the message just never sends.
     // Verified against the live UI. A leading plain-text line avoids it.
-    await page.keyboard.insertText(text.startsWith("```") ? `.\n${text}` : text);
+    const toType = text.startsWith("```") ? `.\n${text}` : text;
+
+    // fill(), not keyboard typing.
+    //
+    // Gemini's composer is a Quill editor, and in the current UI text put
+    // there by synthetic key events — insertText OR key-by-key typing —
+    // lands in the DOM without the editor's own model ever updating. The
+    // text is visibly sitting in the box, the send button is enabled, and
+    // neither Enter nor clicking it does anything, because as far as the app
+    // is concerned the composer is empty. That is what "tool calls stopped
+    // working" looked like from outside: prompts that never sent.
+    //
+    // fill() sets the value and dispatches the input event the editor
+    // listens for, so the app sees the text. Measured against the live UI:
+    // insertText and type() both failed to send, fill() sent every time.
+    // Newlines are safe here — fill presses no keys, so a multi-line prompt
+    // cannot submit itself early.
+    try {
+      await box.fill(toType);
+    } catch {
+      // Older/other composer markup may not be fillable; the key path was
+      // right for it, so keep it as a fallback rather than failing here.
+      await page.keyboard.insertText(toType);
+    }
 
     // Make sure the text actually landed before trying to submit — if the
     // composer is empty, Enter does nothing and we'd hang waiting forever.
@@ -615,15 +635,26 @@ export class GeminiDriver implements IGeminiDriver {
     // composer can read as momentarily empty right after Enter even when the
     // message did NOT send, which previously made this skip the fallback
     // click and then hang forever waiting for a reply that never came.
-    await page.keyboard.press("Enter");
-    if (await this.composerCleared(2_500)) return;
+    // Alternate Enter and the send button a few times rather than trying each
+    // once. Right after a new chat the composer is on screen and filled while
+    // Angular is still wiring it up, so the first Enter AND the first click can
+    // both land on nothing — a one-shot attempt reported "couldn't submit" for
+    // a page that worked a second later. Reproduced in the e2e suite.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await page.keyboard.press("Enter").catch(() => undefined);
+      if (await this.sendLanded(2_500)) return;
 
-    await page
-      .locator(`${selectors.sendButton} >> visible=true`)
-      .first()
-      .click({ timeout: 10_000 })
-      .catch(() => undefined);
-    if (await this.composerCleared(10_000)) return;
+      await page
+        .locator(`${selectors.sendButton} >> visible=true`)
+        .first()
+        .click({ timeout: 5_000 })
+        .catch(() => undefined);
+      if (await this.sendLanded(5_000)) return;
+
+      // Put the caret back: a failed click can move focus off the composer,
+      // and the next Enter would then go nowhere.
+      await box.click().catch(() => undefined);
+    }
 
     throw new Error(
       "Typed the prompt but couldn't submit it — neither Enter nor the send button cleared " +
@@ -690,6 +721,17 @@ export class GeminiDriver implements IGeminiDriver {
   /** True once the composer is empty again — the immediate signal that a send went through. */
   private async composerCleared(timeoutMs: number): Promise<boolean> {
     return this.pollComposer(timeoutMs, (text) => text.length === 0);
+  }
+
+  /**
+   * True once the message is gone from the composer OR a new response has
+   * appeared. The second half matters when retrying: a send can go through
+   * while we are still polling, and without this the retry would type the
+   * same message into an empty composer and send it twice.
+   */
+  private async sendLanded(timeoutMs: number): Promise<boolean> {
+    if (await this.composerCleared(timeoutMs)) return true;
+    return (await this.countResponses().catch(() => 0)) > this.responseCountBeforeSend;
   }
 
   private async pollComposer(timeoutMs: number, predicate: (text: string) => boolean): Promise<boolean> {

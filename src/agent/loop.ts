@@ -41,7 +41,20 @@ const TMP_DIR = ".gemini-code-tmp";
  * to chatting instead of calling tools.
  */
 const REMINDER_EVERY_TURNS = Math.max(0, Number(process.env.GEMINI_CODE_REMINDER_TURNS ?? 5));
-const MAX_DRIFT_NUDGES = Math.max(0, Number(process.env.GEMINI_CODE_DRIFT_NUDGES ?? 2));
+const MAX_DRIFT_NUDGES = Math.max(0, Number(process.env.GEMINI_CODE_DRIFT_NUDGES ?? 3));
+
+/**
+ * A task that ends without a single tool call did nothing, whatever the reply
+ * says. The heuristics below catch the usual phrasings, but they are patterns
+ * and patterns miss; this is the backstop that doesn't depend on wording. One
+ * nudge only — a question really can be answered from the primer's context
+ * alone, and that answer should not be argued with twice.
+ */
+function maxIdleNudges(): number {
+  // Read per call, not at import, so tests and scripts can turn it off
+  // without having to control module load order.
+  return Math.max(0, Number(process.env.GEMINI_CODE_IDLE_NUDGES ?? 1));
+}
 
 /**
  * How many times a "final" answer that clearly isn't final gets pushed to
@@ -103,6 +116,8 @@ export class AgentSession {
     let attachFile: string[] = [...(options.attachments ?? [])];
     let driftNudges = 0;
     let continueNudges = 0;
+    let idleNudges = 0;
+    let toolCallsMade = 0;
 
     if (!this.primed) {
       this.primed = true;
@@ -163,6 +178,20 @@ export class AgentSession {
           continue;
         }
 
+        // Backstop: the task is ending and nothing was ever done. No
+        // wording to match on — just the fact that no tool ran.
+        if (toolCallsMade === 0 && idleNudges < maxIdleNudges()) {
+          idleNudges++;
+          log(noteLine("answered without using any tool — asking it to act instead"));
+          await this.journal?.log("idle nudge: reply used no tools");
+          message =
+            `${buildProtocolReminder()}\n\n` +
+            `You answered without using a single tool, so nothing has actually been done. ` +
+            `If the task needs work in this project, start now with a tool call. ` +
+            `If it was only a question and your answer is complete, say so in one line and stop.`;
+          continue;
+        }
+
         // The model stopped and reported progress instead of finishing.
         // Two signals, strongest first: steps it recorded but never ticked
         // off, then language describing work still in flight ("is
@@ -200,6 +229,7 @@ export class AgentSession {
       }
 
       // kind === "tool_call"
+      toolCallsMade++;
       const { name, args } = parsed.call;
       log(toolCallLine(name, args));
       const tool = this.toolsByName[name];

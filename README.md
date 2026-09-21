@@ -208,6 +208,7 @@ Worth knowing:
 | Replies but takes no action | Protocol drift in a long thread — `/clear` starts a fresh one |
 | Windows: commands fail on `ls`, `rm -rf`, `grep` | No Git Bash found, so they ran in cmd.exe. Install [Git for Windows](https://git-scm.com/download/win) or set `GEMINI_CODE_SHELL` |
 | `Couldn't use Gem "..."` | Check the exact name with `/gems` — the id from the Gem's URL works too |
+| Replies look like normal chat, no tools used | Usually the primer never sent. Update to 0.6.1+; if it persists, `/clear` and retry — the agent now also nudges itself when a task ends with no tool call |
 | `Ctrl+V` does nothing | Your terminal keeps Ctrl+V for its own paste (usual on Windows Terminal and some Linux setups). Type `/paste` instead — same thing |
 
 ### Why there's no single-file binary
@@ -300,6 +301,7 @@ Typing **while a task runs** steers it — your text is folded into the next tur
 | `GEMINI_CODE_ORCHESTRATOR` | `1` | `0` = one tab does everything |
 | `GEMINI_CODE_MAX_WORKERS` | `3` | parallel worker tabs |
 | `GEMINI_CODE_AUTO_APPROVE` | unset | `1` skips all y/N confirmations |
+| `GEMINI_CODE_IDLE_NUDGES` | `1` | times to push back on a task that ends with no tool call |
 | `GEMINI_CODE_PROFILE` | `~/.gemini-code/profile` | Chrome profile dir |
 | `GEMINI_CODE_RESPONSE_TIMEOUT_MS` | `300000` | how long to wait for a reply |
 | `GEMINI_CODE_TURN_RETRIES` | `2` | re-sends before a turn fails |
