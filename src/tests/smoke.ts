@@ -24,6 +24,8 @@ import { bashTool, checkOutputTool, killProcessTool, looksLongRunning, resolveSh
 import { fetchUrlTool } from "../tools/fetchUrl.js";
 import { webSearchTool, parseResults } from "../tools/webSearch.js";
 import { resolveModel, DEFAULT_MODEL_ALIAS, EXTENDED_THINKING } from "../driver/models.js";
+import { resolveGem } from "../driver/GeminiDriver.js";
+import { gemFlag } from "../args.js";
 import { buildProjectTree } from "../context/projectTree.js";
 import { ensureMemoryFile, appendMemory, readMemory, MEMORY_FILENAME } from "../context/memory.js";
 import { collectProjectDocs } from "../context/projectDocs.js";
@@ -1147,6 +1149,42 @@ async function main() {
     // The toggle's on/off state is read from the picker label suffix.
     assert.ok(EXTENDED_THINKING.labelMarker.test("Flash Extended"));
     assert.ok(!EXTENDED_THINKING.labelMarker.test("Flash"));
+  });
+
+  console.log("Gems:");
+  await test("picks a Gem by id, exact name or unambiguous partial", () => {
+    const gems = [
+      { id: "coding-partner", name: "Coding partner" },
+      { id: "a1b2c3", name: "Kite 2" },
+      { id: "d4e5f6", name: "Kite 2 QA" },
+    ];
+    assert.equal((resolveGem("a1b2c3", gems) as { gem: { name: string } }).gem.name, "Kite 2");
+    assert.equal((resolveGem("kite 2", gems) as { gem: { id: string } }).gem.id, "a1b2c3", "exact name wins over partial");
+    assert.equal((resolveGem("QA", gems) as { gem: { id: string } }).gem.id, "d4e5f6");
+    assert.equal((resolveGem("Coding Partner", gems) as { gem: { id: string } }).gem.id, "coding-partner");
+  });
+
+  await test("refuses an ambiguous or unknown Gem instead of guessing", () => {
+    const gems = [
+      { id: "a", name: "Kite 2 Backend" },
+      { id: "b", name: "Kite 2 Frontend" },
+    ];
+    const ambiguous = resolveGem("kite", gems);
+    assert.equal(ambiguous.ok, false);
+    if (!ambiguous.ok) assert.match(ambiguous.error, /matches several Gems.*Backend.*Frontend/s);
+
+    const missing = resolveGem("nope", gems);
+    assert.equal(missing.ok, false);
+    if (!missing.ok) assert.match(missing.error, /No Gem matching "nope".*Available/s);
+
+    assert.equal(resolveGem("   ", gems).ok, false);
+  });
+
+  await test("--gem is read in both spellings", () => {
+    assert.equal(gemFlag(["--gem", "Kite 2"]), "Kite 2");
+    assert.equal(gemFlag(["--gem=Kite 2"]), "Kite 2");
+    assert.equal(gemFlag([]), undefined);
+    assert.equal(gemFlag(["--gem"]), undefined, "a bare --gem is not a Gem named undefined");
   });
 
   console.log("Context (tree + memory):");

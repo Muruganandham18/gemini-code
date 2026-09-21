@@ -94,6 +94,13 @@ export const selectors = {
   /** Starts a brand-new conversation thread. */
   newChatButton: 'button[aria-label^="New chat" i]',
 
+  /**
+   * Links to a Gem on the Gems list page (/gems/view). Each href is
+   * /gem/<id>, where <id> is a slug for Google's premade Gems
+   * ("coding-partner") and an opaque id for your own.
+   */
+  gemLink: 'a[href^="/gem/"]',
+
   /** Opens the model/mode picker. Its aria-label also reports the current model. */
   modePicker: 'button[aria-label*="mode picker" i]',
 
