@@ -35,7 +35,7 @@ import { existsSync } from "node:fs";
 const ORCHESTRATOR_MODE = process.env.GEMINI_CODE_ORCHESTRATOR !== "0";
 
 /** Kept in step with package.json by `npm version`. */
-export const VERSION = "0.6.1";
+export const VERSION = "0.6.2";
 import { openChrome, ensureChromeRunning } from "./scripts/openChrome.js";
 import { checkLogin } from "./scripts/login.js";
 import { c } from "./ui/format.js";

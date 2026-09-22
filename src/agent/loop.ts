@@ -15,7 +15,22 @@ import { parseGeminiReply, looksLikeAbandonedWork, looksUnfinished } from "./too
 import { toolCallLine, toolResultLine, noteLine } from "../ui/format.js";
 import type { PlanJournal } from "../context/plan.js";
 
-const MAX_TOOL_TURNS_PER_TASK = 25;
+/**
+ * Turns one task may take. A real migration hit the old limit of 25 while
+ * still making progress and stopped half-done, which is the opposite of
+ * running unattended. Raised, and tunable — the limit exists to stop a loop
+ * that is going nowhere, not to cap honest work.
+ */
+const MAX_TOOL_TURNS_PER_TASK = Math.max(1, Number(process.env.GEMINI_CODE_MAX_TURNS ?? 60));
+
+/**
+ * A task is abandoned when it stops PROGRESSING, not when it gets slow. Two
+ * measures of "going nowhere", both deliberately generous: nothing but failed
+ * tool calls for this many turns, and the same tool failing the same way over
+ * and over.
+ */
+const STALL_TURNS = Math.max(2, Number(process.env.GEMINI_CODE_STALL_TURNS ?? 8));
+const REPEAT_FAILURE_LIMIT = Math.max(2, Number(process.env.GEMINI_CODE_REPEAT_FAILURES ?? 3));
 
 /**
  * Tool output longer than this gets uploaded as a file attachment rather
@@ -118,6 +133,11 @@ export class AgentSession {
     let continueNudges = 0;
     let idleNudges = 0;
     let toolCallsMade = 0;
+    // Progress tracking, so a task that is stuck can be told so instead of
+    // quietly repeating itself until the turn limit.
+    let turnsSinceProgress = 0;
+    let lastFailure = "";
+    let sameFailureCount = 0;
 
     if (!this.primed) {
       this.primed = true;
@@ -238,9 +258,45 @@ export class AgentSession {
         : { ok: false, output: `Error: unknown tool "${name}". Available: ${Object.keys(this.toolsByName).join(", ")}` };
 
       log(toolResultLine(result.ok, result.output));
+
+      if (result.ok) {
+        turnsSinceProgress = 0;
+        lastFailure = "";
+        sameFailureCount = 0;
+      } else {
+        turnsSinceProgress++;
+        // Same tool, same first line of error = the same wall, hit again.
+        const signature = `${name}: ${result.output.split("\n")[0].slice(0, 120)}`;
+        sameFailureCount = signature === lastFailure ? sameFailureCount + 1 : 1;
+        lastFailure = signature;
+      }
       await this.journal?.log(
         `${name}(${truncateArgs(args)}) -> ${result.ok ? "ok" : "ERROR"}: ${result.output.replace(/\s+/g, " ").slice(0, 160)}`
       );
+
+      // Repeating one failing call wastes the whole task. Say plainly that
+      // this approach is not working and name the ways out, once — the model
+      // otherwise tends to re-send a near-identical call.
+      if (!result.ok && (sameFailureCount >= REPEAT_FAILURE_LIMIT || turnsSinceProgress >= STALL_TURNS)) {
+        const why =
+          sameFailureCount >= REPEAT_FAILURE_LIMIT
+            ? `That is ${sameFailureCount} attempts at ${name} failing the same way.`
+            : `Nothing has succeeded for ${turnsSinceProgress} turns.`;
+        log(noteLine(`stuck — telling it to change approach (${why})`));
+        await this.journal?.log(`stall: ${why}`);
+        message = formatToolResult(
+          `${result.output}\n\n` +
+            `STOP AND CHANGE APPROACH. ${why} Repeating it will not start working.\n` +
+            `- If an edit will not match, read the file again and copy the target text from what you just read, ` +
+            `or replace the whole file with write_file.\n` +
+            `- If a command keeps failing, read its error with check_output before running it again.\n` +
+            `- If this step cannot be done, move on to the next one and report what you skipped at the end.`
+        );
+        turnsSinceProgress = 0;
+        sameFailureCount = 0;
+        lastFailure = "";
+        continue;
+      }
 
       if (result.attachment) {
         // A tool handed back a file (e.g. a screenshot) for Gemini to see.
