@@ -17,6 +17,7 @@ import type { IGeminiDriver, GeminiResponse } from "../driver/IGeminiDriver.js";
 import { readFileTool } from "../tools/readFile.js";
 import { editFileTool } from "../tools/editFile.js";
 import { searchCodeTool, globToRegExp } from "../tools/searchCode.js";
+import { detectEol, findSpans, reindent, nearestContext } from "../tools/matchText.js";
 import { gitStatusTool, gitDiffTool } from "../tools/git.js";
 import { writeFileTool } from "../tools/writeFile.js";
 import { listFilesTool } from "../tools/listFiles.js";
@@ -311,6 +312,29 @@ async function main() {
       false,
       "a plain factual answer is not drift"
     );
+  });
+
+  await test("tells the model to change approach when one call keeps failing", async () => {
+    // The screenshot from a real run: edit_file failing the same way over and
+    // over until the turn limit, having changed nothing.
+    const failing = toolCallResponse("edit_file", {
+      path: ".tmp-test/nope.txt",
+      old_text: "not there",
+      new_text: "x",
+    });
+    const driver = new FakeDriver([
+      failing,
+      failing,
+      failing,
+      toolCallResponse("write_file", { path: ".tmp-test/stall.txt", content: "rewritten" }),
+      finalResponse("Rewrote the file instead."),
+    ]);
+    const answer = await new AgentSession(driver).runTask("change that line");
+    assert.equal(answer, "Rewrote the file instead.");
+    const escalation = driver.sentMessages.find((m) => m.includes("STOP AND CHANGE APPROACH"));
+    assert.ok(escalation, "the third identical failure must be called out");
+    assert.match(escalation!, /3 attempts at edit_file/);
+    assert.match(escalation!, /write_file/, "and name a way out");
   });
 
   await test("gives up nudging so it can't loop forever on a real answer", async () => {
@@ -702,7 +726,7 @@ async function main() {
     const before = await readFile(path.resolve(f), "utf8");
     const r = await editFileTool.run({ path: f, old_text: "not in the file", new_text: "y" });
     assert.equal(r.ok, false);
-    assert.match(r.output, /match character for character/);
+    assert.match(r.output, /that text isn't in/);
     assert.equal(await readFile(path.resolve(f), "utf8"), before, "file unchanged after a failed edit");
   });
 
@@ -728,6 +752,69 @@ async function main() {
     assert.match(windowed.output, /line 500/);
     assert.match(windowed.output, /line 502/);
     assert.ok(!windowed.output.includes("line 503"));
+  });
+
+  await test("edit_file works on a CRLF file, and keeps it CRLF", async () => {
+    // The real Windows failure: the checkout is CRLF, the model reproduces the
+    // line with LF, and every edit is rejected until the turn limit is hit.
+    const crlf = path.join(".tmp-test", "crlf.js");
+    await writeFile(crlf, "function a() {\r\n  return 1;\r\n}\r\n", "utf8");
+    const r = await editFileTool.run({ path: crlf, old_text: "function a() {\n  return 1;\n}", new_text: "function a() {\n  return 2;\n}" });
+    assert.equal(r.ok, true, r.output);
+    const after = await readFile(path.resolve(crlf), "utf8");
+    assert.equal(after, "function a() {\r\n  return 2;\r\n}\r\n", "content changed and CRLF preserved");
+  });
+
+  await test("edit_file tolerates trailing spaces and indentation, and says so", async () => {
+    const f = path.join(".tmp-test", "ws.py");
+    await writeFile(f, "def f():\n        value = 1\n        return value\n", "utf8");
+
+    // The model's copy carries trailing spaces the file doesn't have.
+    const trailing = await editFileTool.run({ path: f, old_text: "        value = 1   ", new_text: "        value = 2" });
+    assert.equal(trailing.ok, true, trailing.output);
+    assert.match(trailing.output, /ignoring trailing whitespace/);
+
+    // Model sends the block with its own (wrong) indentation.
+    const indented = await editFileTool.run({ path: f, old_text: "  value = 2\n  return value", new_text: "  value = 3\n  return value * 2" });
+    assert.equal(indented.ok, true, indented.output);
+    assert.match(indented.output, /ignoring indentation/);
+    const after = await readFile(path.resolve(f), "utf8");
+    assert.equal(after, "def f():\n        value = 3\n        return value * 2\n", "re-indented to the file, not the model");
+  });
+
+  await test("edit_file still refuses a wrong or ambiguous edit, with the nearest lines", async () => {
+    const f = path.join(".tmp-test", "miss.js");
+    await writeFile(f, "const timeout = 30;\nconst retries = 3;\n", "utf8");
+
+    const wrong = await editFileTool.run({ path: f, old_text: "const timeout = 99;", new_text: "const timeout = 60;" });
+    assert.equal(wrong.ok, false);
+    assert.match(wrong.output, /closest lines/);
+    assert.match(wrong.output, /const timeout = 30;/, "shows the real line so it can correct itself");
+
+    await writeFile(f, "a = 1;\na = 1;\n", "utf8");
+    const ambiguous = await editFileTool.run({ path: f, old_text: "a = 1;", new_text: "a = 2;" });
+    assert.equal(ambiguous.ok, false);
+    assert.match(ambiguous.output, /appears 2 times/);
+
+    const all = await editFileTool.run({ path: f, old_text: "a = 1;", new_text: "a = 2;", replace_all: true });
+    assert.equal(all.ok, true, all.output);
+    assert.equal(await readFile(path.resolve(f), "utf8"), "a = 2;\na = 2;\n");
+  });
+
+  await test("matcher prefers the most exact tier and keeps relative indentation", () => {
+    assert.equal(detectEol("a\r\nb\r\n"), "\r\n");
+    assert.equal(detectEol("a\nb\n"), "\n");
+
+    // An exact match must win even when a sloppier one also exists.
+    const content = "x = 1\n  x = 1\n";
+    const exact = findSpans(content, "  x = 1");
+    assert.equal(exact?.how, "exact");
+
+    assert.equal(findSpans("if a:\n    b()\n", "if a:\n  b()")?.how, "indentation");
+    assert.equal(findSpans("value = 2", "value = 9"), undefined, "different characters never match");
+
+    assert.equal(reindent("if x:\n  y()\n  z()", "    "), "    if x:\n      y()\n      z()");
+    assert.equal(nearestContext("aaa\nbbb\n", "zzz"), undefined, "no misleading 'closest' line");
   });
 
   await test("search_code finds matches and skips noise directories", async () => {
