@@ -27,7 +27,19 @@ import { webSearchTool, parseResults } from "../tools/webSearch.js";
 import { resolveModel, DEFAULT_MODEL_ALIAS, EXTENDED_THINKING } from "../driver/models.js";
 import { resolveGem } from "../driver/GeminiDriver.js";
 import { createAskGemTool } from "../tools/askGem.js";
-import { gemFlag, gemModeFlag } from "../args.js";
+import { gemFlag, gemModeFlag, serveArgs } from "../args.js";
+import { startServer } from "../server/openai.js";
+import { isDialogRace } from "../driver/processGuards.js";
+import {
+  buildFreshPrompt,
+  buildContinuationPrompt,
+  continuationOf,
+  modelAliasFor,
+  parseToolCalls,
+  streamableDelta,
+  validateRequest,
+  type ChatMessage,
+} from "../server/protocol.js";
 import { buildProjectTree } from "../context/projectTree.js";
 import { ensureMemoryFile, appendMemory, readMemory, MEMORY_FILENAME } from "../context/memory.js";
 import { collectProjectDocs } from "../context/projectDocs.js";
@@ -1411,6 +1423,288 @@ async function main() {
     assert.equal(gemFlag(["--gem=Kite 2"]), "Kite 2");
     assert.equal(gemFlag([]), undefined);
     assert.equal(gemFlag(["--gem"]), undefined, "a bare --gem is not a Gem named undefined");
+  });
+
+  console.log("OpenAI-compatible API:");
+  await test("model rules match both live picker variants", () => {
+    const byAlias = (a: string) => resolveModel(a)!;
+    // Older menu
+    assert.ok(byAlias("fast").matches("3.6 Flash"));
+    assert.ok(byAlias("pro").matches("3.1 Pro"));
+    // Newer menu, seen on freshly opened tabs
+    assert.ok(byAlias("fastest").matches("3.5 Flash-Lite Fastest answers"));
+    assert.ok(byAlias("fast").matches("Standard thinking Quick everyday help"));
+    assert.ok(byAlias("pro").matches("High thinking Complex problem solving"));
+    assert.ok(!byAlias("fast").matches("3.5 Flash-Lite Fastest answers"), "lite is not flash");
+    // The thinking toggle must not grab a model entry
+    assert.ok(EXTENDED_THINKING.matches("Extended thinking"));
+    assert.ok(!EXTENDED_THINKING.matches("Standard thinking Quick everyday help"));
+    assert.ok(!EXTENDED_THINKING.matches("High thinking Complex problem solving"));
+  });
+
+  await test("maps any client model name to a Gemini model", () => {
+    assert.equal(modelAliasFor(undefined), "fast");
+    assert.equal(modelAliasFor("gemini-web-pro"), "pro");
+    assert.equal(modelAliasFor("gemini-web-flash-lite"), "fastest");
+    assert.equal(modelAliasFor("gemini-2.5-pro"), "pro", "real Gemini API names work");
+    assert.equal(modelAliasFor("gemini-2.0-flash-lite"), "fastest", "lite wins over flash");
+    assert.equal(modelAliasFor("gpt-4o"), "fast", "unknown names fall back instead of failing");
+  });
+
+  await test("rejects requests the web UI can't serve", () => {
+    assert.match(validateRequest({})!, /messages/);
+    assert.match(validateRequest({ messages: [{ role: "robot", content: "x" }] })!, /not supported/);
+    assert.match(validateRequest({ messages: [{ role: "assistant", content: "x" }] })!, /nothing to reply to/);
+    assert.match(validateRequest({ messages: [{ role: "user", content: "x" }], tools: [{ type: "function" }] })!, /tools\[0\]/);
+    assert.equal(validateRequest({ messages: [{ role: "user", content: "hi" }] }), undefined);
+  });
+
+  await test("a single question is sent plainly; a history is sent as a transcript", () => {
+    const simple = buildFreshPrompt({
+      messages: [
+        { role: "system", content: "Be terse." },
+        { role: "user", content: "What is 2+2?" },
+      ],
+    });
+    assert.match(simple, /Be terse\./);
+    assert.match(simple, /What is 2\+2\?$/);
+    assert.doesNotMatch(simple, /User:/, "no transcript framing for one question");
+
+    const history = buildFreshPrompt({
+      messages: [
+        { role: "user", content: "My name is Ada." },
+        { role: "assistant", content: "Hi Ada." },
+        { role: "user", content: [{ type: "text", text: "What is my name?" }] },
+      ],
+    });
+    assert.match(history, /User: My name is Ada\.[\s\S]*Assistant: Hi Ada\.[\s\S]*User: What is my name\?/);
+  });
+
+  await test("continues a thread only when it is exactly the start of the conversation", () => {
+    const history: ChatMessage[] = [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+    ];
+    const next = [...history, { role: "user" as const, content: "and now?" }];
+    assert.deepEqual(continuationOf(history, next), [{ role: "user", content: "and now?" }]);
+
+    const edited = [{ role: "user" as const, content: "HI" }, history[1], { role: "user" as const, content: "x" }];
+    assert.equal(continuationOf(history, edited), undefined, "edited history starts fresh");
+    assert.equal(continuationOf(history, history), undefined, "nothing new to send");
+    assert.equal(continuationOf([], next), undefined, "an empty thread is not a continuation");
+
+    assert.match(
+      buildContinuationPrompt([{ role: "tool", tool_call_id: "call_1", content: "22C" }]),
+      /Function result \(call_1\):\n22C/
+    );
+  });
+
+  await test("parses function calls in every shape Gemini drifts into", () => {
+    const tools = [{ type: "function" as const, function: { name: "get_weather", parameters: {} } }];
+    const wanted = parseToolCalls(
+      { text: "", codeBlocks: ['{"tool_calls": [{"name": "get_weather", "arguments": {"city": "Chennai"}}]}'] },
+      tools
+    );
+    assert.equal(wanted?.[0].function.name, "get_weather");
+    assert.deepEqual(JSON.parse(wanted![0].function.arguments), { city: "Chennai" });
+    assert.match(wanted![0].id, /^call-/);
+
+    const single = parseToolCalls({ text: 'Calling {"name": "get_weather", "args": {"city": "Pune"}} now', codeBlocks: [] }, tools);
+    assert.equal(JSON.parse(single![0].function.arguments).city, "Pune");
+
+    assert.equal(
+      parseToolCalls({ text: '{"name": "delete_everything", "arguments": {}}', codeBlocks: [] }, tools),
+      undefined,
+      "only functions the client offered"
+    );
+    assert.equal(parseToolCalls({ text: "It is sunny.", codeBlocks: [] }, tools), undefined);
+  });
+
+  await test("streams only text that can't change, and never takes text back", () => {
+    assert.equal(streamableDelta("", "line one\nline tw", false), "line one\n", "unfinished line held back");
+    assert.equal(streamableDelta("line one\n", "line one\nline two", true), "line two", "released at the end");
+    assert.equal(streamableDelta("abc", "xbc\n", true), "", "a rewritten prefix sends nothing rather than garbage");
+  });
+
+  await test("serve options: safe defaults, validated values", () => {
+    const d = serveArgs([], {});
+    assert.deepEqual(d, { host: "127.0.0.1", port: 8787, tabs: 2, apiKey: undefined, allowedOrigins: [] });
+    const custom = serveArgs(["--port", "9000", "--tabs=3", "--api-key", "k", "--cors-origin", "http://localhost:3000/"], {});
+    assert.equal(custom.port, 9000);
+    assert.equal(custom.tabs, 3);
+    assert.equal(custom.apiKey, "k");
+    assert.deepEqual(custom.allowedOrigins, ["http://localhost:3000"]);
+    assert.throws(() => serveArgs(["--port", "abc"], {}), /Invalid port/);
+    assert.throws(() => serveArgs(["--tabs", "50"], {}), /1-8/);
+  });
+
+  // A stand-in for the browser: records prompts, answers from a script.
+  const fakeTabs: string[][] = [];
+  const makeFakeDriver = (answers: string[]) => {
+    const prompts: string[] = [];
+    fakeTabs.push(prompts);
+    const next = () => answers.shift() ?? "(no scripted answer)";
+    let current = "";
+    const driver = {
+      prompts,
+      newConversationCalls: 0,
+      async newConversation() {
+        driver.newConversationCalls++;
+      },
+      async setModel(alias: string) {
+        return alias;
+      },
+      async sendPrompt(text: string) {
+        prompts.push(text);
+        current = next();
+      },
+      async waitForResponseComplete() {},
+      async streamResponse(on: (md: string) => void) {
+        const lines = current.split("\n");
+        for (let i = 1; i <= lines.length; i++) on(lines.slice(0, i).join("\n"));
+      },
+      async getLastResponse() {
+        return { text: current, codeBlocks: current.startsWith("{") ? [current] : [] };
+      },
+      async getLastResponseMarkdown() {
+        return current;
+      },
+      async spawnTab() {
+        throw new Error("the fake has one tab");
+      },
+      async close() {},
+    };
+    return driver;
+  };
+
+  const startFake = async (answers: string[], extra: Partial<Parameters<typeof startServer>[0]> = {}) => {
+    const driver = makeFakeDriver(answers);
+    const port = 18000 + Math.floor(Math.random() * 2000);
+    const server = await startServer({
+      driver: driver as never,
+      host: "127.0.0.1",
+      port,
+      tabs: 1,
+      allowedOrigins: [],
+      log: () => {},
+      ...extra,
+    });
+    return { driver, server, base: `http://127.0.0.1:${port}` };
+  };
+  const post = (base: string, body: unknown, headers: Record<string, string> = {}) =>
+    fetch(`${base}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
+
+  await test("serves /v1/models and a chat completion in OpenAI's shape", async () => {
+    const { server, base } = await startFake(["## Hi\n\nHello **there**."]);
+    try {
+      const models = await (await fetch(`${base}/v1/models`)).json();
+      assert.ok(models.data.some((m: { id: string }) => m.id === "gemini-web-pro"));
+
+      const r = await post(base, { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] });
+      assert.equal(r.status, 200);
+      const body = await r.json();
+      assert.equal(body.object, "chat.completion");
+      assert.equal(body.choices[0].message.content, "## Hi\n\nHello **there**.", "markdown, not flattened text");
+      assert.equal(body.choices[0].finish_reason, "stop");
+      assert.ok(body.usage.total_tokens > 0);
+    } finally {
+      await server.close();
+    }
+  });
+
+  await test("streams server-sent events ending in [DONE]", async () => {
+    const { server, base } = await startFake(["one\ntwo\nthree"]);
+    try {
+      const r = await post(base, { messages: [{ role: "user", content: "count" }], stream: true, stream_options: { include_usage: true } });
+      assert.match(r.headers.get("content-type") ?? "", /text\/event-stream/);
+      const events = (await r.text()).split("\n\n").filter(Boolean).map((e) => e.replace(/^data: /, ""));
+      assert.equal(events[events.length - 1], "[DONE]");
+      const chunks = events.slice(0, -1).map((e) => JSON.parse(e));
+      const text = chunks.map((c) => c.choices[0]?.delta?.content ?? "").join("");
+      assert.equal(text, "one\ntwo\nthree", "the pieces add up to the whole answer");
+      assert.ok(chunks.filter((c) => c.choices[0]?.delta?.content).length > 1, "sent in more than one piece");
+      assert.ok(chunks.some((c) => c.choices[0]?.finish_reason === "stop"));
+      assert.ok(chunks.some((c) => c.usage), "usage chunk when asked for");
+    } finally {
+      await server.close();
+    }
+  });
+
+  await test("function calling round trip, continuing the same thread", async () => {
+    const { server, base, driver } = await startFake([
+      '{"tool_calls": [{"name": "get_weather", "arguments": {"city": "Chennai"}}]}',
+      "It is 31C in Chennai.",
+    ]);
+    const tools = [{ type: "function", function: { name: "get_weather", parameters: { type: "object" } } }];
+    try {
+      const first = await (await post(base, { messages: [{ role: "user", content: "Weather in Chennai?" }], tools })).json();
+      const call = first.choices[0].message.tool_calls[0];
+      assert.equal(first.choices[0].finish_reason, "tool_calls");
+      assert.equal(first.choices[0].message.content, null);
+      assert.equal(call.function.name, "get_weather");
+      assert.match(driver.prompts[0], /get_weather/, "the tools were described to Gemini");
+
+      const second = await (
+        await post(base, {
+          tools,
+          messages: [
+            { role: "user", content: "Weather in Chennai?" },
+            first.choices[0].message,
+            { role: "tool", tool_call_id: call.id, content: "31C" },
+          ],
+        })
+      ).json();
+      assert.equal(second.choices[0].message.content, "It is 31C in Chennai.");
+      assert.equal(driver.newConversationCalls, 1, "the second request continued the thread");
+      assert.match(driver.prompts[1], /^Function result \(call-[0-9a-f]+\):\n31C$/, "only the new turn was sent");
+    } finally {
+      await server.close();
+    }
+  });
+
+  await test("API key, origin and content-type checks", async () => {
+    const { server, base } = await startFake(["ok", "ok"], { apiKey: "secret" });
+    try {
+      const noKey = await post(base, { messages: [{ role: "user", content: "hi" }] });
+      assert.equal(noKey.status, 401);
+      assert.equal((await noKey.json()).error.type, "authentication_error");
+
+      const good = await post(base, { messages: [{ role: "user", content: "hi" }] }, { Authorization: "Bearer secret" });
+      assert.equal(good.status, 200);
+
+      // A web page the user visits must not be able to use the account.
+      const fromSite = await post(base, { messages: [{ role: "user", content: "hi" }] }, { Authorization: "Bearer secret", Origin: "https://evil.example" });
+      assert.equal(fromSite.status, 403);
+
+      const plain = await fetch(`${base}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain", Authorization: "Bearer secret" },
+        body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
+      });
+      assert.equal(plain.status, 415, "a no-preflight text/plain POST is refused");
+    } finally {
+      await server.close();
+    }
+  });
+
+  await test("another process answering a dialog first is not fatal; other errors still are", () => {
+    // The exact error that killed a process when a second gemini-code
+    // instance handled the same "Leave site?" dialog first.
+    const race = new Error("Protocol error (Page.handleJavaScriptDialog): No dialog is showing");
+    assert.equal(isDialogRace(race), true);
+    assert.equal(isDialogRace(new Error("Protocol error (Page.navigate): Target closed")), false);
+    assert.equal(isDialogRace(new Error("No dialog is showing")), false, "must name the dialog call");
+  });
+
+  await test("refuses to listen on a network address without a key", async () => {
+    await assert.rejects(
+      startServer({ driver: makeFakeDriver([]) as never, host: "0.0.0.0", port: 18999, tabs: 1, allowedOrigins: [], log: () => {} }),
+      /without an API key/
+    );
   });
 
   console.log("Context (tree + memory):");

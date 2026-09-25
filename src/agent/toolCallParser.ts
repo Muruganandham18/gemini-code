@@ -18,7 +18,7 @@ export type ParseResult =
  * not end the object. Used for the last-resort scan of prose, where Gemini
  * has written the call as a sentence instead of a code block.
  */
-function extractJsonObjects(raw: string): unknown[] {
+export function extractJsonObjects(raw: string): unknown[] {
   const found: unknown[] = [];
   for (let start = 0; start < raw.length; start++) {
     if (raw[start] !== "{") continue;

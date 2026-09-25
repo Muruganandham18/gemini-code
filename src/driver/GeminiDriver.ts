@@ -5,6 +5,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { selectors } from "./selectors.js";
 import type { IGeminiDriver, GeminiResponse } from "./IGeminiDriver.js";
 import { resolveModel, modelHelp, EXTENDED_THINKING } from "./models.js";
+import { HTML_TO_MARKDOWN } from "./markdown.js";
 
 const GEMINI_URL = "https://gemini.google.com/app";
 const GEMS_URL = "https://gemini.google.com/gems/view";
@@ -219,7 +220,7 @@ export class GeminiDriver implements IGeminiDriver {
     const match = resolveGem(idOrName, gems);
     if (!match.ok) throw new Error(match.error);
 
-    await page.goto(gemChatUrl(match.gem.id), { waitUntil: "domcontentloaded" });
+    await this.navigate(gemChatUrl(match.gem.id));
     await this.waitForAppShell();
     if (!page.url().includes(`/gem/${match.gem.id}`)) {
       throw new Error(
@@ -448,20 +449,30 @@ export class GeminiDriver implements IGeminiDriver {
 
     await page.locator(`${selectors.modePicker} >> visible=true`).first().click({ timeout: 10_000 });
     const items = page.locator(selectors.modeMenuItem);
-    await items.first().waitFor({ timeout: 10_000 }).catch(() => {
+    // Wait for a VISIBLE item: the DOM can hold menu items from other,
+    // closed menus, and waiting on the first one in document order timed
+    // out even though the picker was open.
+    await page.locator(`${selectors.modeMenuItem} >> visible=true`).first().waitFor({ timeout: 10_000 }).catch(() => {
       throw new Error("Model picker didn't open — recalibrate selectors.modePicker/modeMenuItem.");
     });
 
-    const count = await items.count();
-    for (let i = 0; i < count; i++) {
-      const item = items.nth(i);
-      if (!(await item.isVisible().catch(() => false))) continue;
-      const text = (await item.innerText().catch(() => "")).trim();
-      if (choice.matches(text)) {
-        await item.click();
-        await page.waitForTimeout(800);
-        return choice.name;
+    // Poll rather than read once: the menu animates in, and on a freshly
+    // opened tab every item can still read as invisible on the first pass —
+    // which reported "Couldn't find Flash" for a menu that plainly had it.
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const count = await items.count();
+      for (let i = 0; i < count; i++) {
+        const item = items.nth(i);
+        if (!(await item.isVisible().catch(() => false))) continue;
+        const text = (await item.innerText().catch(() => "")).trim();
+        if (choice.matches(text)) {
+          await item.click();
+          await page.waitForTimeout(800);
+          return choice.name;
+        }
       }
+      await page.waitForTimeout(250);
     }
 
     // Nothing matched — close the menu rather than leaving it open over the UI.
@@ -503,13 +514,24 @@ export class GeminiDriver implements IGeminiDriver {
     throw new Error("Couldn't find the Extended thinking toggle in the model picker.");
   }
 
+  /**
+   * page.goto() for a tab that may carry the close guard: disarms it first,
+   * so our own navigation doesn't raise a "Leave site?" dialog. The init
+   * script re-arms it on the new document.
+   */
+  private async navigate(url: string): Promise<void> {
+    const page = this.requirePage();
+    await page.evaluate("window.__geminiCodeGuard = false").catch(() => undefined);
+    await page.goto(url, { waitUntil: "domcontentloaded" });
+  }
+
   async newConversation(): Promise<void> {
     const page = this.requirePage();
     // Inside a Gem, "New chat" drops back to a plain Gemini thread and the
     // Gem's expertise silently stops applying. Re-open the Gem's own URL
     // instead, which starts a fresh thread that is still in the Gem.
     if (this.gem) {
-      await page.goto(gemChatUrl(this.gem.id), { waitUntil: "domcontentloaded" });
+      await this.navigate(gemChatUrl(this.gem.id));
       await this.waitForAppShell();
       await this.waitForResponsesCleared();
       return;
@@ -519,7 +541,7 @@ export class GeminiDriver implements IGeminiDriver {
       await newChat.click();
     } else {
       // Fallback: a fresh page load starts a fresh thread too.
-      await page.goto(GEMINI_URL, { waitUntil: "domcontentloaded" });
+      await this.navigate(GEMINI_URL);
       await this.waitForAppShell();
     }
     await this.waitForResponsesCleared();
@@ -572,7 +594,10 @@ export class GeminiDriver implements IGeminiDriver {
       .waitFor({ state: "hidden", timeout: 120_000 })
       .catch(() => undefined);
 
-    const box = page.locator(selectors.composerInput).first();
+    // Visible only: the page carries a second, hidden contenteditable, and on
+    // a freshly opened tab it can come first in the DOM — clicking it waited
+    // out the full 30s timeout and failed the request.
+    const box = page.locator(`${selectors.composerInput} >> visible=true`).first();
     await box.click();
 
     // Clear any leftover draft. Select-all + Backspace is more reliable than
@@ -896,6 +921,49 @@ export class GeminiDriver implements IGeminiDriver {
   }
 
   /**
+   * The latest response as markdown — fences, headings, lists and tables
+   * rebuilt from the rendered HTML (see markdown.ts). What an API client
+   * expects back; the agent keeps using getLastResponse().
+   */
+  async getLastResponseMarkdown(): Promise<string> {
+    const page = this.requirePage();
+    const script =
+      `(() => {` +
+      `  const all = document.querySelectorAll(${JSON.stringify(selectors.responseContainer)});` +
+      `  const last = all[all.length - 1];` +
+      `  if (!last) return "";` +
+      `  const root = last.querySelector(".markdown") || last;` +
+      `  return (${HTML_TO_MARKDOWN})(root);` +
+      `})()`;
+    return ((await page.evaluate(script)) as string) ?? "";
+  }
+
+  /**
+   * Waits for the reply like waitForResponseComplete(), calling `onMarkdown`
+   * with the reply so far every few hundred ms — for streaming it to a
+   * client while Gemini is still writing it.
+   */
+  async streamResponse(
+    onMarkdown: (markdown: string) => void,
+    opts: { timeoutMs?: number; intervalMs?: number } = {}
+  ): Promise<void> {
+    const page = this.requirePage();
+    let done = false;
+    const completion = this.waitForResponseComplete({ timeoutMs: opts.timeoutMs }).finally(() => {
+      done = true;
+    });
+    while (!done) {
+      // Only read once the NEW reply exists, or we'd stream the previous one.
+      if ((await this.countResponses().catch(() => 0)) > this.responseCountBeforeSend) {
+        const md = await this.getLastResponseMarkdown().catch(() => "");
+        if (md) onMarkdown(md);
+      }
+      await page.waitForTimeout(opts.intervalMs ?? 300);
+    }
+    await completion;
+  }
+
+  /**
    * Cheap text-only peek at the latest response, used only for the
    * generation-in-progress stability poll — code blocks aren't needed
    * there, so skip that extra work on every 250ms tick.
@@ -991,6 +1059,11 @@ export class GeminiDriver implements IGeminiDriver {
           // hand. Our own page.close() does NOT run beforeunload, so agent
           // cleanup is unaffected.
           window.addEventListener("beforeunload", function (e) {
+            // navigate() switches this off for our OWN navigations — the
+            // guard is for a person closing the tab by accident, and firing
+            // it on a programmatic reload raised a dialog that every
+            // attached gemini-code process then raced to answer.
+            if (window.__geminiCodeGuard === false) return;
             e.preventDefault();
             e.returnValue = "";
           });
