@@ -16,6 +16,8 @@ import { GeminiDriver } from "../driver/GeminiDriver.js";
 import { chromium } from "playwright";
 import { createServer } from "node:http";
 import { BrowserSession, formatSnapshot } from "../driver/BrowserSession.js";
+import { HTML_TO_MARKDOWN } from "../driver/markdown.js";
+import { readFile } from "node:fs/promises";
 
 async function main() {
   const profileDir = path.resolve(process.cwd(), ".tmp-test-profile");
@@ -74,6 +76,33 @@ function launchTestBrowser() {
  * browser) so it doesn't need the user's logged-in session.
  */
 async function testInteractiveBrowsing(): Promise<void> {
+  console.log("\nReply as markdown (for the API):");
+  {
+    // A real Gemini reply's HTML, captured live: heading, inline styles, a
+    // link, both list kinds, a code block, a table and a blockquote.
+    const fixture = await readFile(path.resolve("src/tests/fixtures/gemini-reply.html"), "utf8");
+    const b = await launchTestBrowser();
+    try {
+      const p = await b.newPage();
+      await p.setContent(`<div id="r">${fixture}</div>`);
+      const md = (await p.evaluate(
+        `(${HTML_TO_MARKDOWN})(document.querySelector("#r .markdown") || document.querySelector("#r"))`
+      )) as string;
+      assert.match(md, /^## Demo$/m, "heading");
+      assert.match(md, /\*\*bold\*\*, \*italic\*, `inline code`/, "inline styles");
+      assert.match(md, /\[link\]\(https:\/\/example\.com\)/, "link, with Gemini's utm_source removed");
+      assert.match(md, /^- First bullet item$/m, "bullets");
+      assert.match(md, /^2\. Second numbered item$/m, "numbering");
+      assert.match(md, /```python\nprint\("hi"\)\n```/, "code fence with its language, no button text");
+      assert.match(md, /^\| Header 1 \| Header 2 \|\n\| --- \| --- \|\n\| Cell 1 \| Cell 2 \|$/m, "table");
+      assert.match(md, /^> This is a blockquote/m, "blockquote");
+      assert.doesNotMatch(md, /Copy code|Download code|Python\n/, "UI chrome stays out");
+      console.log("  ok - rebuilds markdown from a real reply's HTML");
+    } finally {
+      await b.close();
+    }
+  }
+
   console.log("\nInteractive browsing:");
 
   const server = createServer((req, res) => {

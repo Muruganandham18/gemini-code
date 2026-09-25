@@ -3,7 +3,9 @@ import readline from "node:readline/promises";
 import { emitKeypressEvents } from "node:readline";
 import path from "node:path";
 import { GeminiDriver, type Gem } from "./driver/GeminiDriver.js";
-import { gemFlag, gemModeFlag } from "./args.js";
+import { gemFlag, gemModeFlag, serveArgs } from "./args.js";
+import { startServer } from "./server/openai.js";
+import { installDialogRaceGuard } from "./driver/processGuards.js";
 import { AgentSession } from "./agent/loop.js";
 import { buildProjectTree } from "./context/projectTree.js";
 import { collectProjectDocs } from "./context/projectDocs.js";
@@ -35,7 +37,7 @@ import { existsSync } from "node:fs";
 const ORCHESTRATOR_MODE = process.env.GEMINI_CODE_ORCHESTRATOR !== "0";
 
 /** Kept in step with package.json by `npm version`. */
-export const VERSION = "0.6.2";
+export const VERSION = "0.7.0";
 import { openChrome, ensureChromeRunning } from "./scripts/openChrome.js";
 import { checkLogin } from "./scripts/login.js";
 import { c } from "./ui/format.js";
@@ -597,6 +599,12 @@ Usage:
   gemini-code --gem <name>    consult one of your Gems for project knowledge (ask_gem)
   gemini-code --gem <name> --gem-mode inside
                               run the whole session inside the Gem instead
+  gemini-code serve           run an OpenAI-compatible API on http://127.0.0.1:8787/v1
+      --port <n>              port (default 8787)
+      --host <addr>           address to bind (default 127.0.0.1; others need --api-key)
+      --tabs <n>              parallel Gemini tabs = concurrent requests (default 2)
+      --api-key <key>         require "Authorization: Bearer <key>"
+      --cors-origin <url>     let a browser app at <url> call it (repeatable)
   gemini-code open-chrome     open a normal Chrome window to sign into (do this first)
   gemini-code login           check that the signed-in Chrome is reachable
   gemini-code --help          this message
@@ -607,10 +615,64 @@ Environment:
   GEMINI_CODE_MAX_WORKERS     parallel worker tabs (default 3)
   GEMINI_CODE_AUTO_APPROVE=1  skip y/N confirmations for writes, shell and network
   GEMINI_CODE_PROFILE         Chrome profile dir (default ~/.gemini-code/profile)
+  GEMINI_CODE_API_KEY         same as serve --api-key
+  GEMINI_CODE_API_PORT, GEMINI_CODE_API_HOST, GEMINI_CODE_API_TABS, GEMINI_CODE_API_CORS
 `;
+
+/** `gemini-code serve`: the OpenAI-compatible API. */
+async function serve(): Promise<void> {
+  const args = serveArgs(process.argv.slice(3));
+
+  const driver = new GeminiDriver();
+  const launched = await ensureChromeRunning((m) => console.log(c.dim(m)));
+  if (launched) console.log(c.dim("Chrome is up, attaching..."));
+  await driver.attach();
+  await driver.ensureLoggedIn();
+  await driver.markTab("🔌 gemini-code · api 1");
+
+  const { url, close } = await startServer({
+    driver,
+    ...args,
+    log: (msg) => console.log(`${c.dim(new Date().toLocaleTimeString())} ${msg}`),
+  });
+
+  const key = args.apiKey ? "<your key>" : "anything";
+  console.log(`
+${c.magenta("✻")} ${c.bold("gemini-code")} ${c.dim(`v${VERSION} — OpenAI-compatible API on your Gemini web session`)}
+
+  ${c.dim("base url")}  ${c.bold(url)}
+  ${c.dim("models")}    gemini-web-flash (default), gemini-web-pro, gemini-web-flash-lite
+  ${c.dim("tabs")}      up to ${args.tabs} parallel (one request per tab)
+  ${c.dim("auth")}      ${args.apiKey ? "Bearer key required" : "none — localhost only"}${
+    args.allowedOrigins.length ? `
+  ${c.dim("cors")}      ${args.allowedOrigins.join(", ")}` : ""
+  }
+
+${c.dim("Try it:")}
+  curl ${url}/chat/completions -H "Content-Type: application/json" \\
+    ${args.apiKey ? `-H "Authorization: Bearer ${key}" ` : ""}-d '{"model":"gemini-web-flash","messages":[{"role":"user","content":"Hello"}]}'
+
+${c.dim("Or from code, with any OpenAI SDK:")}
+  OpenAI(base_url="${url}", api_key="${key}")
+
+${c.dim("Ctrl+C to stop.")}
+`);
+
+  const shutdown = async () => {
+    console.log(c.dim("\nstopping..."));
+    await close().catch(() => undefined);
+    await driver.close().catch(() => undefined);
+    process.exit(0);
+  };
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
+  // Keep running until a signal: the HTTP server holds the event loop open.
+  await new Promise(() => undefined);
+}
 
 /** Subcommands, so the installed binary is self-sufficient. */
 async function cli(): Promise<void> {
+  installDialogRaceGuard();
   const cmd = process.argv[2];
   switch (cmd) {
     case undefined:
@@ -619,6 +681,8 @@ async function cli(): Promise<void> {
     case "--gem":
     case "--gem-mode":
       return main();
+    case "serve":
+      return serve();
     case "open-chrome":
       return void openChrome();
     case "login":

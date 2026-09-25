@@ -73,10 +73,13 @@ async function main() {
     console.log(`    [parsed as: ${parsed.kind}]`);
     assert.equal(parsed.kind, "tool_call", `expected a tool_call, got ${parsed.kind}`);
     if (parsed.kind === "tool_call") {
-      assert.equal(parsed.call.name, "read_file");
-      // Accept either bare or tree-qualified path — we hand it a tree showing
-      // demo/package.json, so resolving to that is correct behavior, not a bug.
-      assert.match(String(parsed.call.args.path), /(^|\/)package\.json$/);
+      // Looking around first (list_files) is a legitimate, protocol-correct
+      // first move — the test is about compliance, not about which tool.
+      assert.ok(["read_file", "list_files"].includes(parsed.call.name), `unexpected tool ${parsed.call.name}`);
+      if (parsed.call.name === "read_file") {
+        // Bare or tree-qualified: we hand it a tree showing demo/package.json.
+        assert.match(String(parsed.call.args.path), /(^|\/)package\.json$/);
+      }
     }
   });
 

@@ -210,6 +210,8 @@ Worth knowing:
 | `Couldn't use Gem "..."` | Check the exact name with `/gems` — the id from the Gem's URL works too |
 | `edit_file`: "that text isn't in ..." repeatedly | Fixed in 0.6.2 — CRLF files could never match. The error now shows the nearest real lines |
 | Replies look like normal chat, no tools used | Usually the primer never sent. Update to 0.6.1+; if it persists, `/clear` and retry — the agent now also nudges itself when a task ends with no tool call |
+| `serve`: "Refusing to listen on ... without an API key" | You set `--host` to a network address. Add `--api-key`, or keep the default `127.0.0.1` |
+| API returns 403 "Origin ... is not allowed" | A browser app is calling it. Start with `--cors-origin <that app's URL>` |
 | `Ctrl+V` does nothing | Your terminal keeps Ctrl+V for its own paste (usual on Windows Terminal and some Linux setups). Type `/paste` instead — same thing |
 
 ### Why there's no single-file binary
@@ -315,6 +317,86 @@ Typing **while a task runs** steers it — your text is folded into the next tur
 | `GEMINI_CODE_DRIFT_NUDGES` | `2` | nudges when a reply abandons the protocol |
 | `GEMINI_CODE_BASH_TIMEOUT_MS` | `60000` | foreground command timeout |
 | `GEMINI_CODE_SHELL` | Git Bash on Windows, else `sh` | shell commands run in (e.g. `powershell.exe`) |
+
+## Use it as an OpenAI-compatible API
+
+`gemini-code serve` puts an OpenAI-style HTTP API in front of your signed-in Gemini
+session, so any app, script or SDK that lets you set a base URL can use it — no code
+changes beyond that:
+
+```bash
+gemini-code serve                 # http://127.0.0.1:8787/v1
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="anything")
+r = client.chat.completions.create(
+    model="gemini-web-flash",
+    messages=[{"role": "user", "content": "Explain CORS in two sentences."}],
+)
+print(r.choices[0].message.content)
+```
+
+```ts
+import OpenAI from "openai";
+const client = new OpenAI({ baseURL: "http://127.0.0.1:8787/v1", apiKey: "anything" });
+```
+
+```bash
+curl http://127.0.0.1:8787/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model":"gemini-web-flash","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+**What's supported** (all tested with the official OpenAI Python SDK against a live
+session):
+
+| Feature | Notes |
+| --- | --- |
+| `GET /v1/models` | `gemini-web-flash` (default), `gemini-web-pro`, `gemini-web-flash-lite` |
+| `POST /v1/chat/completions` | system, user, assistant and tool messages |
+| Streaming (`stream: true`) | server-sent events ending in `[DONE]`; `stream_options.include_usage` works |
+| Function calling (`tools`) | returns real `tool_calls` with `finish_reason: "tool_calls"`; `tool_choice` `auto` / `required` / a named function / `none` |
+| Images | `image_url` parts, as `data:` URLs or `http(s)` URLs |
+| Markdown output | code fences with their language, headings, lists and tables, rebuilt from the rendered reply |
+
+Model names are lenient: `gemini-2.5-pro` picks Pro, anything with `lite` picks
+Flash-Lite, and names it doesn't know (a hard-coded `gpt-4o`, say) get the default
+rather than an error.
+
+**How a stateless API maps onto a stateful chat.** Every API request carries the whole
+conversation; a Gemini tab remembers its own thread. When a request is exactly an
+earlier one plus new turns — how chat clients and agent loops normally work — it
+**continues that tab's thread** and sends only the new turn, which is faster and keeps
+Gemini's own context. Anything else starts a fresh thread with the conversation folded
+into one prompt.
+
+**Concurrency.** Each request gets its own tab (`--tabs`, default 2, max 8); requests
+beyond that wait in line. Tabs open on demand.
+
+| Flag | Env | Default |
+| --- | --- | --- |
+| `--port` | `GEMINI_CODE_API_PORT` | `8787` |
+| `--host` | `GEMINI_CODE_API_HOST` | `127.0.0.1` |
+| `--tabs` | `GEMINI_CODE_API_TABS` | `2` |
+| `--api-key` | `GEMINI_CODE_API_KEY` | none |
+| `--cors-origin` (repeatable) | `GEMINI_CODE_API_CORS` (comma-separated) | none |
+
+**Security** — this exposes your Gemini account, so the defaults are strict:
+
+- It listens on **localhost only**. Binding to any other address is refused unless an
+  API key is set, since otherwise anyone who could reach the port could use your account.
+- With `--api-key`, every request needs `Authorization: Bearer <key>`.
+- **Requests from web pages are refused** unless you allow that page's origin with
+  `--cors-origin`. A site you happen to visit could otherwise send requests to
+  localhost and use the account. Requests must also be `application/json`, which makes
+  browsers ask permission (a preflight) first.
+
+**Limits worth knowing:** `usage` token counts are estimates (the web UI reports none);
+streaming arrives in bursts rather than token by token, because it's read off the page
+as Gemini renders it; and latency is that of the web UI — a few seconds for a short
+answer. It's your personal Gemini session, so keep it for your own tools rather than
+putting it behind a public service.
 
 ## How it works
 

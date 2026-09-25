@@ -33,20 +33,28 @@ export const MODELS: ModelChoice[] = [
     name: "Flash",
     aliases: ["fast", "flash"],
     hint: "all-around help (default)",
-    matches: (t) => /flash/i.test(t) && !/lite/i.test(t),
+    // Two picker variants are live at once. One lists "Flash" / "Pro"; the
+    // other (seen on freshly opened tabs) lists "Standard thinking — Quick
+    // everyday help" / "High thinking — Complex problem solving" with no
+    // model family named at all. Match both, or tabs on the newer menu
+    // silently stay on whatever model they started with.
+    matches: (t) => (/flash/i.test(t) && !/lite/i.test(t)) || /standard thinking|everyday help/i.test(t),
   },
   {
     name: "Pro",
     aliases: ["pro"],
     hint: "advanced reasoning, slower",
-    matches: (t) => /\bpro\b/i.test(t),
+    matches: (t) => /\bpro\b/i.test(t) || /high thinking|complex problem/i.test(t),
   },
 ];
 
 /** The separate on/off toggle that stacks on the base model. */
 export const EXTENDED_THINKING = {
   name: "Extended thinking",
-  matches: (t: string) => /extended|thinking/i.test(t),
+  // Not bare "thinking": the newer picker names whole models "Standard
+  // thinking" and "High thinking", and matching those would click a model
+  // while trying to flip this toggle.
+  matches: (t: string) => /extended/i.test(t) || (/thinking/i.test(t) && !/standard|high/i.test(t)),
   /** The picker's label appends this word while the toggle is on. */
   labelMarker: /extended/i,
 };
