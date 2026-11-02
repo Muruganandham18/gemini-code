@@ -238,7 +238,7 @@ Semantic versioning, reported by `gemini-code --version`.
 
 | Version | Highlights |
 | --- | --- |
-| **0.8.1** | desktop app and standalone Windows exe, on-demand tool loading with `tool_search`, 40 tools including plan mode, `ask_user`, notebooks, skills and git history, model picker read live from Gemini |
+| **0.8.2** | desktop app and standalone Windows exe, on-demand tool loading with `tool_search`, 40 tools including plan mode, `ask_user`, notebooks, skills and git history, model picker read live from Gemini |
 | **0.4.1** | Windows: commands run in the same console with output captured, Git Bash preferred over cmd, process trees killed properly |
 | **0.4.0** | command output saved to searchable logs; errors surfaced from anywhere in a long build |
 | **0.3.1** | stops the loop ending on a progress report; continuation nudging from the plan |

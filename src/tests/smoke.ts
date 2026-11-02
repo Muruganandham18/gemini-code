@@ -452,19 +452,24 @@ async function main() {
     const id = String(result.output.match(/"(bg_[a-z0-9]+)"/)?.[1]);
     assert.ok(id.startsWith("bg_"), "returns a handle to read later");
 
+    // Polled rather than a fixed wait: Python took longer than 1.5s to start
+    // on a busy CI machine, which failed this for nothing. 127.0.0.1 because
+    // http.server binds IPv4 and localhost can resolve to IPv6 first.
+    const serving = () => fetch("http://127.0.0.1:8911").then((r) => r.ok).catch(() => false);
+    const until = async (wanted: boolean) => {
+      for (let i = 0; i < 80 && (await serving()) !== wanted; i++) await new Promise((r) => setTimeout(r, 250));
+      return serving();
+    };
+
     // It should actually be serving.
-    await new Promise((r) => setTimeout(r, 1500));
-    const alive = await fetch("http://localhost:8911").then((r) => r.ok).catch(() => false);
-    assert.ok(alive, "the backgrounded server should really be running");
+    assert.ok(await until(true), "the backgrounded server should really be running");
 
     const logs = await checkOutputTool.run({ id });
     assert.match(logs.output, /running/);
 
     // And killing it must take down the whole tree, not just the shell.
     await killProcessTool.run({ id });
-    await new Promise((r) => setTimeout(r, 1500));
-    const stillAlive = await fetch("http://localhost:8911").then((r) => r.ok).catch(() => false);
-    assert.equal(stillAlive, false, "killing must stop the server, leaving no orphan holding the port");
+    assert.equal(await until(false), false, "killing must stop the server, leaving no orphan holding the port");
   });
 
   await test("surfaces the error from the MIDDLE of a huge failing build", async () => {

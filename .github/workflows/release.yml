@@ -1,4 +1,5 @@
-# Pushing a tag like v0.8.0 tests it, builds both downloads and publishes a release.
+# Pushing a tag like v0.8.2 tests it, builds both downloads and publishes a release.
+# Changing this pipeline does a dry run on the branch: everything but publishing.
 #
 # The tarball isn't optional: install.sh and install.ps1 look for a .tar.gz on the
 # latest release, so a release with only the exe would break them.
@@ -7,6 +8,12 @@ name: Release
 on:
   push:
     tags: ["v*"]
+    branches: ["**"]
+    # Applies to the branches only: GitHub ignores it for tags.
+    paths:
+      - .github/workflows/release.yml
+      - ui/build_exe.ps1
+      - scripts/package-release.sh
 
 jobs:
   tarball:
@@ -23,6 +30,9 @@ jobs:
         with:
           name: tarball
           path: .release/*.tar.gz
+          if-no-files-found: error
+          # .release counts as hidden, and hidden paths are skipped by default.
+          include-hidden-files: true
 
   exe:
     runs-on: windows-latest
@@ -44,9 +54,12 @@ jobs:
         with:
           name: exe
           path: .release/exe/gemini-code.exe
+          if-no-files-found: error
+          include-hidden-files: true
 
   publish:
     needs: [tarball, exe]
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
