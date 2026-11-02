@@ -1,7 +1,10 @@
+<p align="center"><img src="ui/gemini_code_ui/assets/logo.png" width="112" alt="gemini-code logo"></p>
+
 # gemini-code
 
-A Claude-Code-style terminal coding agent that runs on the **Gemini web UI**, for
-people who have a Gemini web subscription but no Gemini API or CLI access.
+A Claude-Code-style coding agent that runs on the **Gemini web UI**, for people who have
+a Gemini web subscription but no Gemini API or CLI access. Use it in the terminal, or as
+a [desktop app](#desktop-app).
 
 It drives a real, logged-in Chrome tab with Playwright: your prompt goes into the
 composer, Gemini's reply is parsed back out, and any tools it asks for run
@@ -226,12 +229,16 @@ The installer and the release tarball (`npm run package`, ~4 MB) are the honest
 version of the same idea: one command, no build. They need Node on the machine,
 which is a small ask next to Chrome, which is needed anyway.
 
+The [desktop app's exe](#desktop-app) gets around this without bundling Playwright: it's
+an archive that carries Node and real `node_modules`, and unpacks them when it starts.
+
 ## Versioning
 
 Semantic versioning, reported by `gemini-code --version`.
 
 | Version | Highlights |
 | --- | --- |
+| **0.8.0** | desktop app and standalone Windows exe, on-demand tool loading with `tool_search`, 40 tools including plan mode, `ask_user`, notebooks, skills and git history, model picker read live from Gemini |
 | **0.4.1** | Windows: commands run in the same console with output captured, Git Bash preferred over cmd, process trees killed properly |
 | **0.4.0** | command output saved to searchable logs; errors surfaced from anywhere in a long build |
 | **0.3.1** | stops the loop ending on a progress report; continuation nudging from the plan |
@@ -397,6 +404,107 @@ streaming arrives in bursts rather than token by token, because it's read off th
 as Gemini renders it; and latency is that of the web UI — a few seconds for a short
 answer. It's your personal Gemini session, so keep it for your own tools rather than
 putting it behind a public service.
+
+## Desktop app
+
+A native app (PySide6, no web server) with the chat and every setting in one window.
+
+**On Windows, [download `gemini-code.exe`](https://github.com/Muruganandham18/gemini-code/releases/latest)
+and run it.** It's one file with Node.js and the agent inside, so Google Chrome is all you
+need installed. It unpacks itself to a temp folder when it starts, so the first launch
+takes a few seconds. The exe isn't code-signed, so Windows SmartScreen may warn you the
+first time: choose **More info**, then **Run anyway**.
+
+To run it from a checkout instead, which needs Node.js and Python 3.10+:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ui\setup.ps1
+```
+
+Then double-click `ui\gemini-code-ui.bat`. On macOS or Linux, `npm install && npm run
+build`, make a venv, `pip install -r ui/requirements.txt`, and from `ui/` run
+`python -m gemini_code_ui`. `ui\build_exe.ps1` builds the exe yourself.
+
+Choose a project folder and the agent starts there. The first time, Chrome opens for
+you to sign in by hand; the app carries on by itself once you have.
+
+| Page | What's there |
+| --- | --- |
+| **Chat** | Tasks and questions, live tool activity, rendered answers, and Allow/Deny for each write, command and network request. Typing during a task steers it, and **Stop** ends it before the next turn. Attach images with the button, by pasting, or by dropping them on the composer. The terminal's slash commands work; `/help` lists them. |
+| **Plan** | `GEMINI-PLAN.md`, the journal of the current task |
+| **Memory** | `GEMINI.md`, the durable project memory |
+| **Settings** | Every `GEMINI_CODE_*` variable in [Environment](#environment), with the same defaults. Model and thinking live in the composer's picker instead |
+| **API server** | Start and stop `gemini-code serve`, with its address, port, tabs, key and CORS origins |
+| **Logs** | Everything the agent reported |
+
+The picker in the composer lists exactly what Gemini's own picker offers your account,
+read from the browser each time it opens, so it follows new models and plan changes by
+itself. Models above your plan show **Upgrade** and can't be chosen: Gemini answers those
+with a paid upgrade dialog, so the agent refuses them without clicking.
+
+Model, thinking and Gem changes apply at once. Saving **Settings** restarts the agent,
+because it reads most of them only at startup, and that starts a new Gemini thread.
+
+**Stop** can't interrupt Gemini mid-reply, or worker tabs that are already running: it
+takes effect at the next turn of the main tab. **Restart agent** is the hard stop.
+
+Settings are kept in `~/.gemini-code/ui-settings.json`, including the API key if you set
+one, unencrypted.
+
+The app runs the agent as a child process and talks to it over `gemini-code bridge`:
+one JSON object per line on stdin and stdout, documented in
+[`src/bridge/bridge.ts`](src/bridge/bridge.ts). Anything else could drive it the same way.
+
+```bash
+python ui/tests/test_app.py        # the app against a fake agent, no browser
+python ui/tests/real_bridge.py     # the real agent over its pipes
+```
+
+## Tools
+
+Gemini sees a small core set in full. The rest are named and nothing more, and it loads
+what it needs with `tool_search`, so the first message stays small and context goes on
+the work.
+
+| Claude Code | Here | Loaded |
+| --- | --- | --- |
+| Read | `read_file`, and `read_files` for several at once | core, on demand |
+| Write | `write_file` | core |
+| Edit, MultiEdit | `edit_file`, `multi_edit` | core, on demand |
+| Glob | `find_files` | core |
+| Grep | `search_code` | core |
+| Bash | `run_bash` | core |
+| BashOutput, KillShell | `check_output`, `kill_process` | core, on demand |
+| Monitor | `wait_for_output` | on demand |
+| LS | `list_files`, `file_info` | core, on demand |
+| NotebookRead, NotebookEdit | `notebook_read`, `notebook_edit` | on demand |
+| WebFetch, WebSearch | `fetch_url`, `web_search` | on demand |
+| Browser tools | `read_page`, `screenshot_page`, `browser_open`, `browser_do`, `browser_close` | on demand |
+| Task | `delegate_tasks` | core |
+| TodoWrite | `update_plan` | core |
+| AskUserQuestion | `ask_user` | on demand |
+| EnterPlanMode, ExitPlanMode | `enter_plan_mode`, `exit_plan_mode` | on demand |
+| Skill | `use_skill` | on demand |
+| ToolSearch | `tool_search` | core |
+| LSP | `code_outline`, `find_symbol`: pattern-based, not a language server | on demand |
+| git through Bash | `git_status`, `git_diff`, and read-only `git_log`, `git_show`, `git_blame` | core, on demand |
+| File operations through Bash | `move_file`, `copy_file`, `delete_file`, all undoable with `/undo` | on demand |
+
+**Loading.** `tool_search` takes keywords, or `select:a,b` to load several in one call,
+which matters because each tool call is a whole Gemini message. Calling a tool that was
+never loaded runs nothing and returns its definition, so a guess at its arguments costs a
+turn rather than doing the wrong thing. Worker tabs load their own.
+
+**Plan mode.** Only tools on an explicit read-only list run, so a new tool is blocked
+until someone decides it's safe. Gemini can enter it with `enter_plan_mode`, or you can
+with the **Plan mode** button in the app. It ends when you approve a plan through
+`exit_plan_mode`.
+
+**Skills.** A skill is reusable instructions for a kind of task, in
+`.gemini-code/skills/<name>/SKILL.md` or `.claude/skills/<name>/SKILL.md` in the project,
+or `~/.gemini-code/skills/<name>/SKILL.md` for all of them. `use_skill` lists and reads them.
+
+Not here: MCP servers, git worktrees, and scheduled or cloud agents.
 
 ## How it works
 
@@ -635,7 +743,9 @@ src/
   tools/      read/write/bash/fetch/list/remember/update_plan
   context/    project tree, docs, GEMINI.md memory, plan journal
   ui/         terminal formatting
+  bridge/     the agent as JSON lines over stdio, for the desktop app
   cli.ts      REPL, slash commands, orchestrator wiring
+ui/           the desktop app (Python, PySide6)
 ```
 
 The non-obvious failures found while building this — the ones that cost real

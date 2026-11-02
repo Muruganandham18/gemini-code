@@ -87,13 +87,21 @@ You have been given one self-contained piece of a larger job by an orchestrator.
 }
 
 export function buildSystemPrimer(toolList: ToolDefinition[], role: AgentRole = "solo"): string {
-  const toolDocs = toolList.map((t) => `- ${t.description}`).join("\n");
+  const toolDocs = toolList
+    .filter((t) => !t.deferred)
+    .map((t) => `- ${t.description}`)
+    .join("\n");
+  const deferred = toolList.filter((t) => t.deferred).map((t) => t.name);
+  const onDemand = deferred.length
+    ? `\n\nMORE TOOLS, available on demand. You know only their names until you load them with tool_search, ` +
+      `so do that first when one would help:\n${deferred.join(", ")}`
+    : "";
 
   return `You are an autonomous coding agent working in a local project directory.
 You do not have direct filesystem, shell, or network access — instead you have these tools,
 which a local program will execute on your behalf:
 
-${toolDocs}
+${toolDocs}${onDemand}
 
 RULES FOR USING TOOLS:
 - To use a tool, reply with ONLY a single code block (a \`\`\`json fenced block is fine), containing exactly this JSON and nothing else:
@@ -194,6 +202,7 @@ Rules that keep being broken:
 - Do NOT ask for permission or offer to continue — you already have it, and the
   user is asked to approve writes and commands separately. Just make the call.
 - The JSON goes in a code block on its own, with no prose around it.
+- If you've lost track of a tool, tool_search finds it: {"name": "tool_search", "args": {"query": "keywords"}}
 
 Reply in plain prose with NO code block only when the work is genuinely finished.`;
 }

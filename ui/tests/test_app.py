@@ -1,0 +1,581 @@
+"""UI tests, no framework, in the style of src/tests/smoke.ts.
+
+Runs the real window against tests/fake_bridge.py, with no browser or Gemini:
+
+    python ui/tests/test_app.py [folder-for-screenshots]
+"""
+import json
+import os
+import re
+import sys
+import tempfile
+import time
+import traceback
+from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+UI_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(UI_ROOT))
+
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QFontDatabase
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
+
+from gemini_code_ui import chat
+from gemini_code_ui.chat import ConfirmCard, CodeBlock, MarkdownView, split_markdown
+from gemini_code_ui.settings import SETTINGS, Settings
+from gemini_code_ui.theme import apply_theme
+from gemini_code_ui.window import MainWindow
+
+BACKEND = [sys.executable, str(UI_ROOT / "tests" / "fake_bridge.py")]
+
+app = QApplication([])
+apply_theme(app)
+shots = Path(sys.argv[1]) if len(sys.argv) > 1 else None
+scratch = Path(tempfile.mkdtemp())
+# The offscreen platform has no fonts of its own, so screenshots need some.
+for font in ("segoeui", "seguisb", "segoeuib", "seguisym", "CascadiaMono", "consola"):
+    QFontDatabase.addApplicationFont(f"C:/Windows/Fonts/{font}.ttf")
+passed = failed = 0
+
+
+def test(fn):
+    global passed, failed
+    try:
+        fn()
+        passed += 1
+        print(f"  ok - {fn.__name__.replace('_', ' ')}")
+    except Exception:
+        failed += 1
+        print(f"  FAIL - {fn.__name__}\n{traceback.format_exc()}")
+    return fn
+
+
+def wait_for(condition, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if condition():
+            return
+        QTest.qWait(10)
+    raise AssertionError("timed out waiting for the UI")
+
+
+def make_window(project=True) -> MainWindow:
+    folder = scratch / "project"
+    folder.mkdir(exist_ok=True)
+    settings = Settings({"project": str(folder) if project else ""}, scratch / "settings.json")
+    window = MainWindow(settings, BACKEND)
+    window.show()
+    if project:
+        wait_for(lambda: window.state == "ready")
+    return window
+
+
+def transcript(window) -> str:
+    """The chat as text, with each widget's kind, for asserting on."""
+    out = []
+    content = window.chat.view.widget()
+    for label in content.findChildren(QLabel):
+        out.append(label.text())
+    for view in content.findChildren(MarkdownView):
+        out.append(view.toPlainText())
+    return "\n".join(out)
+
+
+def send(window, text):
+    window.chat.composer.edit.setPlainText(text)
+    QTest.keyClick(window.chat.composer.edit, Qt.Key.Key_Return)
+
+
+def shot(window, name):
+    if shots:
+        shots.mkdir(parents=True, exist_ok=True)
+        app.processEvents()
+        window.grab().save(str(shots / f"{name}.png"))
+
+
+def close(window):
+    window.state = "ready"  # skip the "task running" question
+    window.close()
+
+
+print("Markdown splitting:")
+
+
+@test
+def separates_code_from_prose():
+    parts = split_markdown("before\n```python\nx = 1\n```\nafter")
+    assert parts == [("text", "before", ""), ("code", "x = 1", "python"), ("text", "after", "")]
+
+
+@test
+def an_unclosed_fence_runs_to_the_end():
+    assert split_markdown("```\nstill code") == [("code", "still code", "")]
+
+
+@test
+def a_fence_inside_a_longer_fence_is_code():
+    body = "````md\n```\ninner\n```\n````"
+    assert split_markdown(body) == [("code", "```\ninner\n```", "md")]
+
+
+print("Settings:")
+
+
+@test
+def defaults_pass_nothing_to_the_agent():
+    assert all(value is None for value in Settings().env().values())
+
+
+@test
+def changed_values_become_environment_variables():
+    settings = Settings({"model": "pro", "orchestrator": False, "auto_approve": True, "max_turns": 80})
+    env = settings.env()
+    assert env["GEMINI_CODE_MODEL"] == "pro"
+    assert env["GEMINI_CODE_ORCHESTRATOR"] == "0"
+    assert env["GEMINI_CODE_AUTO_APPROVE"] == "1"
+    assert env["GEMINI_CODE_MAX_TURNS"] == "80"
+
+
+@test
+def survives_a_round_trip_and_ignores_unknown_keys():
+    path = scratch / "round-trip.json"
+    Settings({"max_workers": 5}, path).save()
+    assert Settings.load(path)["max_workers"] == 5
+    path.write_text(json.dumps({"nonsense": 1, "model": "pro"}), encoding="utf-8")
+    loaded = Settings.load(path)
+    assert "nonsense" not in loaded.values and loaded["model"] == "pro"
+
+
+@test
+def a_corrupt_file_falls_back_to_defaults():
+    path = scratch / "corrupt.json"
+    path.write_text("{not json", encoding="utf-8")
+    assert Settings.load(path)["gem_mode"] == "reference"
+
+
+@test
+def every_environment_variable_the_agent_reads_is_configurable():
+    used = set()
+    for file in (UI_ROOT.parent / "src").rglob("*.ts"):
+        if "tests" not in file.parts:
+            used |= set(re.findall(r"GEMINI_CODE_[A-Z_]+", file.read_text(encoding="utf-8")))
+    missing = used - {s.env for s in SETTINGS}
+    assert not missing, f"not in the UI: {sorted(missing)}"
+
+
+print("Window, against a fake agent:")
+
+
+@test
+def first_run_waits_for_a_project_folder():
+    window = make_window(project=False)
+    QTest.qWait(50)
+    assert window.state == "offline" and not window.agent.running()
+    assert "Choose a project folder" in transcript(window)
+    assert not window.chat.composer.send_button.isEnabled()
+    shot(window, "first-run")
+    close(window)
+
+
+@test
+def startup_shows_context_and_a_resumable_plan():
+    window = make_window()
+    text = transcript(window)
+    assert "Ready in demo" in text and "unfinished plan" in text
+    wait_for(lambda: "Starting" not in transcript(window))  # startup chatter is cleared once ready
+    close(window)
+
+
+@test
+def a_task_shows_tools_then_a_rendered_answer():
+    window = make_window()
+    send(window, "look around")
+    wait_for(lambda: window.chat.view.widget().findChildren(CodeBlock))
+    wait_for(lambda: window.state == "ready")
+    text = transcript(window)
+    assert "look around" in text and "read_file" in text and "a.py" in text
+    assert "[api]" in text and "run_bash" in text and "Exit code 1" in text
+    block = window.chat.view.widget().findChildren(CodeBlock)[0]
+    assert 'return "hi"' in block.code
+    assert window.chat.composer.edit.toPlainText() == ""
+    shot(window, "task")
+    close(window)
+
+
+@test
+def code_is_copied_exactly():
+    window = make_window()
+    send(window, "look around")
+    wait_for(lambda: window.chat.view.widget().findChildren(CodeBlock))
+    block = window.chat.view.widget().findChildren(CodeBlock)[0]
+    block.copy.click()
+    assert QApplication.clipboard().text() == block.code
+    close(window)
+
+
+@test
+def a_plain_question_shows_its_answer_and_quiets_the_nudge_reply():
+    window = make_window()
+    send(window, "a question")
+    wait_for(lambda: "That answer is complete." in transcript(window))
+    views = [v.toPlainText() for v in window.chat.view.widget().findChildren(MarkdownView)]
+    assert views == ["Paris is the capital of France."], views
+    close(window)
+
+
+@test
+def allow_approves_and_the_card_collapses():
+    window = make_window()
+    send(window, "write a file")
+    wait_for(lambda: window.chat.view.widget().findChildren(ConfirmCard))
+    card = window.chat.view.widget().findChildren(ConfirmCard)[0]
+    assert window.state == "busy"
+    shot(window, "confirm")
+    card.allow.click()
+    wait_for(lambda: "Wrote it." in transcript(window))
+    assert "Allowed" in card.title.text() and not card.buttons.isVisible()
+    close(window)
+
+
+@test
+def deny_refuses():
+    window = make_window()
+    send(window, "write a file")
+    wait_for(lambda: window.chat.view.widget().findChildren(ConfirmCard))
+    window.chat.view.widget().findChildren(ConfirmCard)[0].deny.click()
+    wait_for(lambda: "Skipped that." in transcript(window))
+    assert "declined by the user" in transcript(window)
+    close(window)
+
+
+def question_card(window):
+    wait_for(lambda: window.chat.view.widget().findChildren(chat.QuestionCard))
+    return window.chat.view.widget().findChildren(chat.QuestionCard)[0]
+
+
+@test
+def a_question_offers_its_choices_and_closes_when_answered():
+    window = make_window()
+    send(window, "choose one")
+    card = question_card(window)
+    assert [b.text() for b in card.choices] == ["Postgres", "SQLite"]
+    shot(window, "question")
+    card.choices[1].click()
+    wait_for(lambda: "Using SQLite." in transcript(window))
+    assert "SQLite" in card.title.text() and not card.body.isVisible()
+    close(window)
+
+
+@test
+def a_question_also_takes_a_typed_answer():
+    window = make_window()
+    send(window, "choose one")
+    card = question_card(window)
+    card.field.setText("MySQL")
+    card.field.returnPressed.emit()
+    wait_for(lambda: "Using MySQL." in transcript(window))
+    close(window)
+
+
+@test
+def stop_closes_a_pending_question():
+    window = make_window()
+    send(window, "choose one")
+    card = question_card(window)
+    window.chat.composer.stop_button.click()
+    wait_for(lambda: window.state == "ready")
+    assert "No answer" in card.title.text()
+    close(window)
+
+
+@test
+def the_plan_mode_toggle_follows_the_agent():
+    window = make_window()
+    button = window.chat.composer.plan_button
+    button.click()
+    assert button.isChecked()
+    send(window, "plan it")
+    wait_for(lambda: window.state == "ready" and not button.isChecked())
+    close(window)
+
+
+@test
+def stop_closes_the_pending_approval():
+    window = make_window()
+    send(window, "write a file")
+    wait_for(lambda: window.chat.view.widget().findChildren(ConfirmCard))
+    window.chat.composer.stop_button.click()
+    wait_for(lambda: window.state == "ready")
+    card = window.chat.view.widget().findChildren(ConfirmCard)[0]
+    assert "Denied (task stopped)" in card.title.text()
+    assert "Stopped." in transcript(window)
+    close(window)
+
+
+@test
+def typing_during_a_task_steers_it_rather_than_starting_another():
+    window = make_window()
+    send(window, "hang around")
+    wait_for(lambda: window.state == "busy")
+    assert "Steer" in window.chat.composer.send_button.toolTip()
+    composer = window.chat.composer
+    assert not composer.model_button.isEnabled() and not composer.gem_button.isEnabled()
+    assert not window.new_chat_button.isEnabled()
+    send(window, "use tabs instead")
+    wait_for(lambda: "Steering: use tabs instead" in transcript(window))
+    window.chat.composer.stop_button.click()
+    wait_for(lambda: window.state == "ready")
+    assert window.chat.composer.send_button.toolTip() == "Send"
+    close(window)
+
+
+@test
+def a_failed_task_says_why_and_the_chat_stays_usable():
+    window = make_window()
+    send(window, "fail please")
+    wait_for(lambda: "Gemini never replied." in transcript(window))
+    assert window.state == "ready" and window.chat.composer.send_button.isEnabled()
+    close(window)
+
+
+def pill(window):
+    return window.chat.composer.model_button.text()
+
+
+def open_picker(window):
+    window.chat.composer.model_button.click()
+    wait_for(window.model_popup.isVisible)
+    return window.model_popup
+
+
+@test
+def the_picker_lists_what_gemini_offers_and_nothing_else():
+    window = make_window()
+    assert pill(window).startswith("Auto · Low"), pill(window)
+    popup = open_picker(window)
+    names = [row.name for row in popup.rows[:3]]
+    assert names == ["Auto", "Test Fast", "4 Argon"], names
+    assert "Flash" not in " ".join(row.name for row in popup.rows), "no model of our own may appear"
+    assert list(popup.levels) == ["Low", "Medium", "High"]
+    assert popup.levels["Low"].isChecked()
+    if shots:
+        wait_for(lambda: len(popup.rows) == 4)
+        app.processEvents()
+        popup.grab().save(str(shots / "picker.png"))
+    popup.hide()
+    close(window)
+
+
+@test
+def reopening_the_picker_refreshes_it_from_the_browser():
+    window = make_window()
+    popup = open_picker(window)
+    wait_for(lambda: "Test Lite" in [row.name for row in popup.rows])
+    close(window)
+
+
+@test
+def a_locked_model_cannot_be_chosen_from_the_picker():
+    window = make_window()
+    popup = open_picker(window)
+    chosen = []
+    popup.modelChosen.connect(chosen.append)
+    row = next(r for r in popup.rows if r.name == "4 Argon")
+    assert row.locked
+    QTest.mouseClick(row, Qt.MouseButton.LeftButton)
+    QTest.keyClick(row, Qt.Key.Key_Return)
+    assert chosen == [] and popup.isVisible()
+    close(window)
+
+
+@test
+def choosing_a_model_applies_it_and_remembers_it():
+    window = make_window()
+    popup = open_picker(window)
+    QTest.mouseClick(next(r for r in popup.rows if r.name == "Test Fast"), Qt.MouseButton.LeftButton)
+    wait_for(lambda: pill(window).startswith("Test Fast"))
+    assert not popup.isVisible()
+    assert Settings.load(window.settings.path)["model"] == "Test Fast"
+    close(window)
+
+
+@test
+def a_refused_model_says_why_and_the_pill_stays_truthful():
+    window = make_window()
+    send(window, "/model 4 Argon")
+    wait_for(lambda: "isn't included in your Gemini plan" in transcript(window))
+    wait_for(lambda: pill(window).startswith("Auto"))
+    assert window.settings["model"] == ""
+    close(window)
+
+
+@test
+def thinking_level_is_applied_and_remembered():
+    window = make_window()
+    popup = open_picker(window)
+    popup.levels["High"].click()
+    wait_for(lambda: "High" in pill(window))
+    assert Settings.load(window.settings.path)["thinking_level"] == "High"
+    close(window)
+
+
+@test
+def no_readable_list_says_so_instead_of_inventing_one():
+    folder = scratch / "project"
+    settings = Settings({"project": str(folder)}, scratch / "settings.json")
+    window = MainWindow(settings, [*BACKEND, "--no-models"])
+    window.show()
+    wait_for(lambda: window.state == "ready")
+    popup = open_picker(window)
+    assert not popup.rows
+    assert "Couldn't read the model list" in " ".join(l.text() for l in popup.findChildren(QLabel))
+    close(window)
+
+
+@test
+def tool_details_stay_folded_unless_the_tool_failed():
+    window = make_window()
+    send(window, "look around")
+    wait_for(lambda: window.chat.view.widget().findChildren(CodeBlock))
+    good, bad = window.chat.view.widget().findChildren(chat.ToolRow)
+    assert good.details.isHidden() and not bad.details.isHidden()
+    good.chevron.click()
+    assert not good.details.isHidden()
+    close(window)
+
+
+@test
+def gems_load_and_one_can_be_chosen():
+    window = make_window()
+    window.load_gems()
+    wait_for(lambda: window.gems == ["Kite 2", "Storybook"])
+    window._apply_gem("Kite 2")
+    wait_for(lambda: "Using Gem: Kite 2" in transcript(window))
+    assert window.settings["gem"] == "Kite 2"
+    assert window.chat.composer.gem_button.text().startswith("Kite 2")
+    close(window)
+
+
+@test
+def slash_commands_work_and_unknown_ones_are_not_sent_as_tasks():
+    window = make_window()
+    send(window, "/help")
+    assert "/undo" in transcript(window)
+    send(window, "/nonsense")
+    assert "Unknown command /nonsense" in transcript(window)
+    send(window, "/thinking on")
+    wait_for(lambda: "High" in pill(window))
+    assert window.settings["thinking_level"] == "High"
+    close(window)
+
+
+@test
+def memory_page_shows_and_adds_notes():
+    window = make_window()
+    window.nav.setCurrentRow(2)
+    wait_for(lambda: "uses pnpm" in window.memory_page.view.toPlainText())
+    window.memory_page.note.setText("prefers tabs")
+    window.memory_page.note.returnPressed.emit()
+    wait_for(lambda: "prefers tabs" in window.memory_page.view.toPlainText())
+    shot(window, "memory")
+    close(window)
+
+
+@test
+def plan_page_explains_when_there_is_no_plan():
+    window = make_window()
+    window.nav.setCurrentRow(1)
+    wait_for(lambda: "No plan yet" in window.plan_page.view.toPlainText())
+    close(window)
+
+
+@test
+def saving_settings_restarts_the_agent_with_them():
+    window = make_window()
+    window.nav.setCurrentRow(3)
+    shot(window, "settings")
+    window.settings_page.form.editors["max_workers"].set_value(5)
+    window.settings_page.save.click()
+    assert Settings.load(window.settings.path)["max_workers"] == 5
+    wait_for(lambda: window.state == "offline" or "Restarting" in transcript(window))
+    wait_for(lambda: window.state == "ready")
+    assert window.pages.currentWidget() is window.chat
+    close(window)
+
+
+@test
+def undo_asks_first():
+    window = make_window()
+    asked = []
+    original = QMessageBox.question
+    QMessageBox.question = staticmethod(lambda *a: asked.append(a) or QMessageBox.StandardButton.No)
+    try:
+        window.undo()
+        assert asked and "Reverted" not in transcript(window)
+        QMessageBox.question = staticmethod(lambda *a: QMessageBox.StandardButton.Yes)
+        window.undo()
+        wait_for(lambda: "Reverted 2 files." in transcript(window))
+    finally:
+        QMessageBox.question = original
+    close(window)
+
+
+@test
+def an_agent_that_dies_is_reported_and_restart_works():
+    window = make_window()
+    window.agent._proc.kill()
+    wait_for(lambda: window.state == "failed")
+    assert "The agent stopped" in transcript(window)
+    window.restart_action.trigger()
+    wait_for(lambda: window.state == "ready")
+    close(window)
+
+
+@test
+def a_backend_that_cannot_start_is_reported():
+    folder = scratch / "project"
+    settings = Settings({"project": str(folder)}, scratch / "settings.json")
+    window = MainWindow(settings, ["this-program-does-not-exist-anywhere"])
+    window.show()
+    wait_for(lambda: window.state == "failed")
+    assert "Couldn't start the agent" in transcript(window)
+    close(window)
+
+
+@test
+def closing_stops_the_agent():
+    window = make_window()
+    assert window.agent.running()
+    window.close()
+    assert not window.agent.running()
+
+
+@test
+def clearing_the_chat_right_after_copying_is_safe():
+    window = make_window()
+    send(window, "look around")
+    wait_for(lambda: window.chat.view.widget().findChildren(CodeBlock))
+    window.chat.view.widget().findChildren(CodeBlock)[0].copy.click()
+    window.chat.view.clear()
+    QTest.qWait(1700)  # past the button's "Copied" timer
+    close(window)
+
+
+@test
+def links_only_open_for_web_addresses():
+    opened = []
+    real = chat.QDesktopServices.openUrl
+    chat.QDesktopServices.openUrl = staticmethod(lambda url: opened.append(url.scheme()))
+    try:
+        chat.open_link(QUrl("https://example.com"))
+        chat.open_link(QUrl("file:///C:/Windows/System32/calc.exe"))
+        assert opened == ["https"]
+    finally:
+        chat.QDesktopServices.openUrl = real
+
+
+print(f"\n{passed} passed, {failed} failed")
+sys.exit(1 if failed else 0)

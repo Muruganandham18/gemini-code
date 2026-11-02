@@ -6,7 +6,8 @@ import { GeminiDriver, type Gem } from "./driver/GeminiDriver.js";
 import { gemFlag, gemModeFlag, serveArgs } from "./args.js";
 import { startServer } from "./server/openai.js";
 import { installDialogRaceGuard } from "./driver/processGuards.js";
-import { AgentSession } from "./agent/loop.js";
+import { createMainSession } from "./agent/mainSession.js";
+import { runBridge } from "./bridge/run.js";
 import { buildProjectTree } from "./context/projectTree.js";
 import { collectProjectDocs } from "./context/projectDocs.js";
 import { ensureMemoryFile, readMemory, appendMemory, MEMORY_FILENAME } from "./context/memory.js";
@@ -17,14 +18,10 @@ import {
 } from "./driver/models.js";
 import { tools } from "./tools/index.js";
 import { killAllBackgroundProcesses } from "./tools/bash.js";
-import { createDelegateTool, MAX_PARALLEL_WORKERS } from "./agent/workers.js";
+import { MAX_PARALLEL_WORKERS } from "./agent/workers.js";
 import { createAskGemTool } from "./tools/askGem.js";
 import type { ToolDefinition } from "./types.js";
 import { PlanJournal, findResumablePlan, readPlan, clearPlan, PLAN_FILENAME } from "./context/plan.js";
-import { createUpdatePlanTool } from "./tools/updatePlan.js";
-import { createScreenshotTool } from "./tools/screenshot.js";
-import { createBrowsePageTool } from "./tools/browsePage.js";
-import { createBrowserTools } from "./tools/browser.js";
 import { checkpoints } from "./context/checkpoint.js";
 import { readClipboardImageDetailed, isImagePath, normalizeDroppedPath } from "./context/clipboard.js";
 import { existsSync } from "node:fs";
@@ -37,7 +34,7 @@ import { existsSync } from "node:fs";
 const ORCHESTRATOR_MODE = process.env.GEMINI_CODE_ORCHESTRATOR !== "0";
 
 /** Kept in step with package.json by `npm version`. */
-export const VERSION = "0.7.0";
+export const VERSION = "0.8.0";
 import { openChrome, ensureChromeRunning } from "./scripts/openChrome.js";
 import { checkLogin } from "./scripts/login.js";
 import { c } from "./ui/format.js";
@@ -152,7 +149,7 @@ ${c.magenta("✻")} ${c.bold("gemini-code")} ${c.dim(`v${VERSION} — Claude-Cod
         : ""
   }
   ${c.dim("context")} project tree (${tree.split("\n").length} lines)${memory ? `, ${MEMORY_FILENAME}` : ""}${docs.length ? `, ${docs.length} doc${docs.length > 1 ? "s" : ""} (${docs.map((d) => d.path).join(", ")})` : ""}
-  ${c.dim("tools")}   ${[...tools.map((t) => t.name), "delegate_tasks", "update_plan", "screenshot_page", "read_page", "browser_open", "browser_do", ...(gemConsultant ? ["ask_gem"] : [])].join(", ")}
+  ${c.dim("tools")}   ${tools.filter((t) => !t.deferred).map((t) => t.name).join(", ")}, ${c.dim("and more loaded on demand")}
   ${c.dim("workers")} up to ${MAX_PARALLEL_WORKERS} parallel Gemini tabs
   ${c.dim("mode")}    ${ORCHESTRATOR_MODE ? "orchestrator — main tab plans & validates, workers implement" : "solo — one tab does everything"}
 ${created ? `\n  ${c.green("✓")} created ${MEMORY_FILENAME} for durable project memory` : ""}${
@@ -163,53 +160,17 @@ ${created ? `\n  ${c.green("✓")} created ${MEMORY_FILENAME} for durable projec
 ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing while a task runs steers it.")}
 `);
 
-  /**
-   * The main tab can delegate subtasks to parallel worker tabs. Workers get
-   * the same context and tools but NOT this one, so delegation can't nest.
-   */
   const journal = new PlanJournal();
-  const makeMainSession = (mem: string | undefined, resumePlan?: string) => {
-    const ctx = { tree, memory: mem, docs, resumePlan };
-    const delegate = createDelegateTool({
-      parent: driver,
-      context: { tree, memory: mem, docs },
-      modelAlias: startModel,
-      log: (msg) => console.log(msg),
-      createSession: (workerDriver, workerContext) =>
-        // Workers: no delegate tool (no nesting), no journal (the main
-        // thread owns the plan), and the "worker" role so they report back
-        // a short summary instead of pasting code into the orchestrator.
-        new AgentSession(
-          workerDriver,
-          workerContext,
-          [
-            createScreenshotTool(workerDriver),
-            createBrowsePageTool(workerDriver),
-            ...createBrowserTools(workerDriver),
-            // Workers share the ONE Gem tab (questions are queued inside the
-            // tool): they need the project's conventions more than the
-            // planning tab does.
-            ...(gemConsultant ? [gemConsultant.tool] : []),
-          ],
-          undefined,
-          "worker"
-        ),
-    });
-    return new AgentSession(
+  const makeMainSession = (mem: string | undefined, resumePlan?: string) =>
+    createMainSession({
       driver,
-      ctx,
-      [
-        delegate,
-        createUpdatePlanTool(journal),
-        createScreenshotTool(driver),
-        createBrowsePageTool(driver),
-        ...createBrowserTools(driver),
-        ...(gemConsultant ? [gemConsultant.tool] : []),
-      ],
+      context: { tree, memory: mem, docs, resumePlan },
       journal,
-      ORCHESTRATOR_MODE ? "orchestrator" : "solo"
-    );
-  };
+      modelAlias: () => startModel,
+      gemTool: gemConsultant?.tool,
+      orchestrator: ORCHESTRATOR_MODE,
+      log: (msg) => console.log(msg),
+    });
 
   // The resume plan is injected once, into the first session only — after
   // that it's either finished or superseded by the new run's own journal.
@@ -605,6 +566,7 @@ Usage:
       --tabs <n>              parallel Gemini tabs = concurrent requests (default 2)
       --api-key <key>         require "Authorization: Bearer <key>"
       --cors-origin <url>     let a browser app at <url> call it (repeatable)
+  gemini-code bridge          run the agent over JSON lines on stdin/stdout (the desktop UI uses this)
   gemini-code open-chrome     open a normal Chrome window to sign into (do this first)
   gemini-code login           check that the signed-in Chrome is reachable
   gemini-code --help          this message
@@ -683,6 +645,8 @@ async function cli(): Promise<void> {
       return main();
     case "serve":
       return serve();
+    case "bridge":
+      return runBridge();
     case "open-chrome":
       return void openChrome();
     case "login":

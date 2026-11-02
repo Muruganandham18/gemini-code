@@ -4,7 +4,15 @@ import { homedir } from "node:os";
 import { existsSync, mkdirSync } from "node:fs";
 import { selectors } from "./selectors.js";
 import type { IGeminiDriver, GeminiResponse } from "./IGeminiDriver.js";
-import { resolveModel, modelHelp, EXTENDED_THINKING } from "./models.js";
+import {
+  EXTENDED_THINKING,
+  menuRowMatches,
+  parseModelRows,
+  parseThinkingRows,
+  type LiveModel,
+  type MenuRow,
+  type ModelMenu,
+} from "./models.js";
 import { HTML_TO_MARKDOWN } from "./markdown.js";
 
 const GEMINI_URL = "https://gemini.google.com/app";
@@ -109,6 +117,8 @@ export class GeminiDriver implements IGeminiDriver {
   private connection: Browser | undefined;
   /** Last-read picker label, e.g. "Flash Extended" — used to detect toggle state. */
   private currentModelLabel = "";
+  /** Last level set here; the picker's label doesn't report it. */
+  private thinkingLevel = "";
   private readonly userDataDir: string;
   private readonly headless: boolean;
   private readonly channel: "chrome" | undefined;
@@ -337,7 +347,11 @@ export class GeminiDriver implements IGeminiDriver {
    * has to happen once, by hand, in the visible window this opened.
    * We never touch credentials here.
    */
-  async ensureLoggedIn(timeoutMs = 5 * 60_000): Promise<void> {
+  async ensureLoggedIn(
+    timeoutMs = 5 * 60_000,
+    /** A desktop app has piped stdin and a person in front of it, so it says so. */
+    interactive = Boolean(process.stdin.isTTY)
+  ): Promise<void> {
     const page = this.requirePage();
     // `.first()` alone isn't enough here: the page has multiple "Sign in"
     // elements and the first in DOM order is a hidden one (a collapsed nav
@@ -348,6 +362,12 @@ export class GeminiDriver implements IGeminiDriver {
 
     if (!(await signIn.isVisible().catch(() => false))) return; // already signed in
 
+    // A tab left open from before signing in still shows the button, so a
+    // signed-in session looked signed out until someone reloaded it by hand.
+    await this.navigate(this.homeUrl()).catch(() => undefined);
+    await this.waitForAppShell().catch(() => undefined);
+    if (!(await signIn.isVisible().catch(() => false))) return;
+
     // Sessions do expire, so this isn't only a first-run path. Put the
     // window in front of the user rather than silently blocking on a
     // browser they may not even have visible.
@@ -356,7 +376,7 @@ export class GeminiDriver implements IGeminiDriver {
     // Waiting 5 minutes for a human makes no sense with piped stdin — in a
     // script there is nobody to sign in, so say so and fail immediately
     // instead of hanging until the timeout.
-    if (!process.stdin.isTTY) {
+    if (!interactive) {
       throw new Error(
         "Your Gemini session is signed out, and this isn't an interactive terminal.\n" +
           "Run `gemini-code login` yourself, sign in in the Chrome window it brings up, then retry."
@@ -432,55 +452,155 @@ export class GeminiDriver implements IGeminiDriver {
     return this.currentModelLabel;
   }
 
-  /**
-   * Switches the Gemini model via the picker. `alias` is a friendly name
-   * ("fast", "pro", …) resolved by models.ts, which matches menu entries on
-   * keywords rather than exact labels so Google's version bumps
-   * ("3.5 Flash" → "3.6 Flash") don't break it.
-   */
-  async setModel(alias: string): Promise<string> {
+  private async openModePicker(): Promise<void> {
     const page = this.requirePage();
-    const choice = resolveModel(alias);
-    if (!choice) {
-      throw new Error(
-        `Unknown model "${alias}". Options:\n${modelHelp()}`
-      );
-    }
-
     await page.locator(`${selectors.modePicker} >> visible=true`).first().click({ timeout: 10_000 });
-    const items = page.locator(selectors.modeMenuItem);
     // Wait for a VISIBLE item: the DOM can hold menu items from other,
     // closed menus, and waiting on the first one in document order timed
     // out even though the picker was open.
     await page.locator(`${selectors.modeMenuItem} >> visible=true`).first().waitFor({ timeout: 10_000 }).catch(() => {
       throw new Error("Model picker didn't open — recalibrate selectors.modePicker/modeMenuItem.");
     });
+  }
+
+  /** Twice, for a submenu and then the menu, so nothing stays open over the UI. */
+  private async closeModePicker(): Promise<void> {
+    const page = this.requirePage();
+    await page.keyboard.press("Escape").catch(() => {});
+    await page.waitForTimeout(150);
+    await page.keyboard.press("Escape").catch(() => {});
+    await page.waitForTimeout(150);
+  }
+
+  private readMenuRows(selector: string): Promise<MenuRow[]> {
+    return this.requirePage()
+      .locator(selector)
+      .evaluateAll((elements) =>
+        elements
+          .filter((el) => el.getBoundingClientRect().width > 0)
+          .map((el) => ({
+            text: (el as HTMLElement).innerText.trim(),
+            testId: el.getAttribute("data-test-id") ?? "",
+            selected: el.classList.contains("selected"),
+          }))
+      );
+  }
+
+  /** Opens the Thinking level submenu, if this picker has one. */
+  private async openThinkingLevels(): Promise<boolean> {
+    const page = this.requirePage();
+    const entry = page.locator(`${selectors.thinkingLevelMenu} >> visible=true`).first();
+    if (!(await entry.isVisible().catch(() => false))) return false;
+    await entry.hover();
+    await page.locator(`${selectors.thinkingLevelItem} >> visible=true`).first().waitFor({ timeout: 3_000 });
+    return true;
+  }
+
+  /**
+   * Reads what the account can pick right now, straight from the picker.
+   * Google changes these per account and per release, so anything showing a
+   * choice of model should use this rather than the MODELS table.
+   */
+  async listModels(): Promise<ModelMenu> {
+    const page = this.requirePage();
+    await this.openModePicker();
+    try {
+      // The menu fills in row by row on a fresh tab: a single read returned
+      // "Auto" alone from a menu with three models. Wait for it to settle.
+      const deadline = Date.now() + 5_000;
+      let models: LiveModel[] = [];
+      let unchanged = 0;
+      while (unchanged < 2 && Date.now() < deadline) {
+        await page.waitForTimeout(250);
+        const rows = parseModelRows(await this.readMenuRows(selectors.modeMenuItem));
+        unchanged = rows.length && rows.length === models.length ? unchanged + 1 : 0;
+        models = rows;
+      }
+      const thinking = (await this.openThinkingLevels().catch(() => false))
+        ? parseThinkingRows(await this.readMenuRows(selectors.thinkingLevelItem))
+        : [];
+      return { models, thinking, current: await this.getCurrentModel() };
+    } finally {
+      await this.closeModePicker();
+    }
+  }
+
+  /**
+   * Switches the Gemini model via the picker. `wanted` is a name from the live
+   * menu ("3.1 Pro"), or a friendly alias ("fast", "pro", …) from models.ts,
+   * which matches entries on keywords rather than exact labels so Google's
+   * version bumps ("3.5 Flash" → "3.6 Flash") don't break it.
+   *
+   * Returns the picker's label afterwards. A model above the account's plan
+   * is refused without clicking it: Gemini would answer with an upgrade dialog,
+   * and the session would carry on, on a different model than it claimed.
+   */
+  async setModel(wanted: string): Promise<string> {
+    const page = this.requirePage();
+    await this.openModePicker();
+    const items = page.locator(selectors.modeMenuItem);
 
     // Poll rather than read once: the menu animates in, and on a freshly
     // opened tab every item can still read as invisible on the first pass —
     // which reported "Couldn't find Flash" for a menu that plainly had it.
     const deadline = Date.now() + 5_000;
+    let seen: string[] = [];
     while (Date.now() < deadline) {
+      const rows = await this.readMenuRows(selectors.modeMenuItem);
+      seen = parseModelRows(rows).map((m) => m.name);
       const count = await items.count();
       for (let i = 0; i < count; i++) {
         const item = items.nth(i);
         if (!(await item.isVisible().catch(() => false))) continue;
         const text = (await item.innerText().catch(() => "")).trim();
-        if (choice.matches(text)) {
-          await item.click();
-          await page.waitForTimeout(800);
-          return choice.name;
+        if (!menuRowMatches(wanted, text)) continue;
+
+        const name = text.split("\n")[0].trim();
+        if (/upsell/i.test((await item.getAttribute("data-test-id")) ?? "")) {
+          await this.closeModePicker();
+          throw new Error(`"${name}" isn't included in your Gemini plan.`);
         }
+        await item.click();
+        await page.waitForTimeout(800);
+        // In case an unmarked row turned out to be an upsell too.
+        if (await page.locator(`${selectors.upgradeDialog} >> visible=true`).first().isVisible().catch(() => false)) {
+          await this.closeModePicker();
+          throw new Error(`"${name}" isn't included in your Gemini plan.`);
+        }
+        return this.getCurrentModel();
       }
       await page.waitForTimeout(250);
     }
 
     // Nothing matched — close the menu rather than leaving it open over the UI.
-    await page.keyboard.press("Escape").catch(() => {});
-    throw new Error(
-      `Couldn't find "${choice.name}" in the model picker. Available entries were checked against ` +
-        `keyword rules in models.ts; Google may have renamed them.`
-    );
+    await this.closeModePicker();
+    throw new Error(`Couldn't find "${wanted}" in the model picker. It offers: ${seen.join(", ") || "nothing readable"}.`);
+  }
+
+  /** Picks a level from the Thinking level submenu, e.g. "High". */
+  async setThinkingLevel(level: string): Promise<void> {
+    const page = this.requirePage();
+    await this.openModePicker();
+    try {
+      if (!(await this.openThinkingLevels())) {
+        throw new Error("This model picker has no Thinking level menu.");
+      }
+      const wanted = level.trim().toLowerCase();
+      const items = page.locator(`${selectors.thinkingLevelItem} >> visible=true`);
+      const count = await items.count();
+      for (let i = 0; i < count; i++) {
+        const text = (await items.nth(i).innerText().catch(() => "")).trim();
+        if (text.split("\n")[0].trim().toLowerCase() === wanted) {
+          await items.nth(i).click();
+          await page.waitForTimeout(800);
+          this.thinkingLevel = wanted;
+          return;
+        }
+      }
+      throw new Error(`Couldn't find thinking level "${level}".`);
+    } finally {
+      await this.closeModePicker();
+    }
   }
 
   /**
@@ -491,14 +611,21 @@ export class GeminiDriver implements IGeminiDriver {
    */
   async setExtendedThinking(enabled: boolean): Promise<boolean> {
     const page = this.requirePage();
-    const isOn = () => EXTENDED_THINKING.labelMarker.test(this.currentModelLabel);
+    const isOn = () =>
+      EXTENDED_THINKING.labelMarker.test(this.currentModelLabel) || this.thinkingLevel === "high";
     await this.getCurrentModel(); // refresh the cached label
     if (isOn() === enabled) return enabled;
 
-    await page.locator(`${selectors.modePicker} >> visible=true`).first().click({ timeout: 10_000 });
-    const items = page.locator(selectors.modeMenuItem);
-    await items.first().waitFor({ timeout: 10_000 });
+    await this.openModePicker();
+    // Pickers with a Thinking level menu have no on/off, so the nearest
+    // meaning is the two ends of the scale.
+    if (await page.locator(`${selectors.thinkingLevelMenu} >> visible=true`).first().isVisible().catch(() => false)) {
+      await this.closeModePicker();
+      await this.setThinkingLevel(enabled ? "High" : "Low");
+      return enabled;
+    }
 
+    const items = page.locator(selectors.modeMenuItem);
     const count = await items.count();
     for (let i = 0; i < count; i++) {
       const item = items.nth(i);

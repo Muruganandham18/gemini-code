@@ -1,5 +1,5 @@
 import readline from "node:readline/promises";
-import { getAsker } from "../ui/prompt.js";
+import { getAsker, getQuestioner } from "../ui/prompt.js";
 
 /**
  * Serializes prompts. With parallel worker tabs, several tools can want
@@ -21,6 +21,26 @@ export async function confirmAction(promptLabel: string, detail: string): Promis
 
   const run = queue.then(() => ask(promptLabel, detail));
   // Keep the chain alive even if one prompt rejects.
+  queue = run.catch(() => undefined);
+  return run;
+}
+
+/**
+ * Asks the user a question and returns the reply, or undefined when nobody is
+ * there to answer. In the same queue as confirmations, and unaffected by
+ * auto-approve: that skips permission, and an answer isn't a permission.
+ */
+export function askQuestion(question: string, options: string[] = []): Promise<string | undefined> {
+  const run = queue.then(async () => {
+    const questioner = getQuestioner();
+    if (questioner) return questioner(question, options);
+
+    const asker = getAsker();
+    if (!asker) return undefined;
+    const choices = options.map((option, i) => `  ${i + 1}. ${option}\n`).join("");
+    const answer = (await asker(`\n[gemini-code] ${question}\n${choices}  > `)).trim();
+    return options[Number(answer) - 1] ?? answer;
+  });
   queue = run.catch(() => undefined);
   return run;
 }
