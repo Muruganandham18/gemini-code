@@ -30,6 +30,9 @@ export const tools: ToolDefinition[] = [
   checkOutputTool,
   gitStatusTool,
   gitDiffTool,
+  // Not deferred: the context lists skills by description, so a skill that
+  // fits should cost one call to use, not a tool_search first.
+  useSkillTool,
 
   // Named in the primer and loaded through tool_search when wanted.
   ...[
@@ -51,7 +54,6 @@ export const tools: ToolDefinition[] = [
     fetchUrlTool,
     webSearchTool,
     rememberTool,
-    useSkillTool,
     askUserTool,
   ].map(deferTool),
 ];

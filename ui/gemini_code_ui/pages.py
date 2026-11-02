@@ -1,6 +1,8 @@
 """Everything beside the chat: settings, API server, plan, memory and logs."""
 from __future__ import annotations
 
+from html import escape
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
@@ -21,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import theme
 from .chat import open_link
 from .settings import API, BROWSER, GENERAL, LIMITS, SETTINGS, TIMEOUTS, WORKERS, Setting, Settings
 
@@ -301,6 +304,168 @@ class PlanPage(DocumentPage):
         clear.setObjectName("danger")
         clear.clicked.connect(self.clear)
         self.actions.insertWidget(1, clear)
+
+
+class SkillsPage(QWidget):
+    """Claude-compatible skills: what's here, and installing more from GitHub."""
+
+    find = Signal(str)
+    install = Signal(str, list)
+    remove = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.source = ""
+        self.choices: dict[str, QCheckBox] = {}
+        layout = page_layout(self, "Skills")
+        intro = QLabel(
+            "Instructions for particular kinds of task, in the same SKILL.md format as Claude Code. Gemini sees each "
+            "one's name and description, and loads the rest when it's useful."
+        )
+        intro.setObjectName("muted")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.field = QLineEdit()
+        self.field.setPlaceholderText("A GitHub repository: owner/repo, or paste its URL")
+        self.field.setAccessibleName("GitHub repository")
+        self.field.returnPressed.connect(self._find)
+        self.find_button = QPushButton("Find skills")
+        self.find_button.setObjectName("primary")
+        self.find_button.clicked.connect(self._find)
+        row = QHBoxLayout()
+        row.addWidget(self.field, 1)
+        row.addWidget(self.find_button)
+        layout.addLayout(row)
+
+        self.message = QLabel("")
+        self.message.setObjectName("help")
+        self.message.setWordWrap(True)
+        layout.addWidget(self.message)
+
+        self._content = QWidget()
+        self._list = QVBoxLayout(self._content)
+        self._list.setContentsMargins(0, 0, 8, 0)
+        self._list.setSpacing(6)
+        self._results = QVBoxLayout()
+        self._results.setSpacing(4)
+        self.install_button = QPushButton("Install selected")
+        self.install_button.setObjectName("primary")
+        self.install_button.clicked.connect(self._install)
+        self.install_button.hide()
+        self._list.addLayout(self._results)
+        self._list.addWidget(self.install_button, 0, Qt.AlignmentFlag.AlignRight)
+        self._installed = QVBoxLayout()
+        self._installed.setSpacing(6)
+        self._list.addLayout(self._installed)
+        self._list.addStretch()
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._content)
+        layout.addWidget(scroll, 1)
+
+    @staticmethod
+    def _clear(layout: QVBoxLayout) -> None:
+        # Recursive: a row is a layout holding a layout, and anything missed
+        # stays on screen under the new rows.
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                SkillsPage._clear(item.layout())
+
+    def _find(self) -> None:
+        source = self.field.text().strip()
+        if source:
+            self.source = source
+            self.say("Looking on GitHub…")
+            self.find_button.setEnabled(False)
+            self.find.emit(source)
+
+    def say(self, text: str) -> None:
+        self.message.setText(text)
+
+    def show_found(self, found: list[dict] | None, error: str = "") -> None:
+        self.find_button.setEnabled(True)
+        self.choices = {}
+        self._clear(self._results)
+        self.install_button.hide()
+        if error:
+            self.say(error)
+            return
+        if not found:
+            self.say("No skills there. A skill is a folder with a SKILL.md.")
+            return
+        self.say(f"{len(found)} skill{'' if len(found) == 1 else 's'} found. Choose what to install.")
+        for skill in found:
+            box = QCheckBox(skill["name"])
+            box.setChecked(len(found) == 1)
+            scripts = len(skill.get("scripts") or [])
+            detail = skill.get("description", "")
+            if scripts:
+                # Worth seeing before installing: these are programs the agent may run.
+                detail += f" Includes {scripts} script{'' if scripts == 1 else 's'} it may ask to run."
+            note = QLabel(detail)
+            note.setObjectName("help")
+            note.setWordWrap(True)
+            note.setContentsMargins(23, 0, 0, 4)
+            self.choices[skill["name"]] = box
+            self._results.addWidget(box)
+            self._results.addWidget(note)
+        self.install_button.show()
+
+    def _install(self) -> None:
+        names = [name for name, box in self.choices.items() if box.isChecked()]
+        if names:
+            self.say("Installing…")
+            self.install_button.setEnabled(False)
+            self.install.emit(self.source, names)
+
+    def installed(self, names: list[str] | None, error: str = "") -> None:
+        self.install_button.setEnabled(True)
+        if error:
+            self.say(error)
+            return
+        self._clear(self._results)
+        self.install_button.hide()
+        self.choices = {}
+        self.field.clear()
+        self.say(f"Installed {', '.join(names or [])}. Gemini lists new skills from the next new chat.")
+
+    def show_skills(self, data: dict) -> None:
+        self._clear(self._installed)
+        skills = data.get("installed") or []
+        others = data.get("others") or []
+        if not skills and not others:
+            empty = QLabel("No skills yet.")
+            empty.setObjectName("muted")
+            self._installed.addWidget(empty)
+            return
+        for skill in skills:
+            self._add_row(skill, skill.get("source") or "installed", removable=True)
+        for skill in others:
+            self._add_row(skill, {"project": "this project", "claude": "~/.claude/skills"}.get(skill.get("source"), ""), removable=False)
+
+    def _add_row(self, skill: dict, origin: str, removable: bool) -> None:
+        name = QLabel(f"<b>{escape(skill['name'])}</b> <span style='color:{theme.MUTED}'>{escape(origin)}</span>")
+        name.setTextFormat(Qt.TextFormat.RichText)
+        description = QLabel(skill.get("description", ""))
+        description.setObjectName("help")
+        description.setWordWrap(True)
+        text = QVBoxLayout()
+        text.setSpacing(0)
+        text.addWidget(name)
+        text.addWidget(description)
+        row = QHBoxLayout()
+        row.addLayout(text, 1)
+        if removable:
+            remove = QPushButton("Remove")
+            remove.setObjectName("small")
+            remove.clicked.connect(lambda: self.remove.emit(skill["name"]))
+            row.addWidget(remove, 0, Qt.AlignmentFlag.AlignTop)
+        self._installed.addLayout(row)
 
 
 class LogsPage(QWidget):

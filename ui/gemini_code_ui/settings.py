@@ -55,6 +55,8 @@ SETTINGS: tuple[Setting, ...] = (
             choices=(("reference", "Reference (ask_gem consults it)"), ("inside", "Inside (whole session runs in it)"))),
     Setting("orchestrator", "Orchestrator mode", GENERAL, "bool", True, "GEMINI_CODE_ORCHESTRATOR",
             help="Main tab plans and validates while worker tabs implement. Off: one tab does everything."),
+    Setting("claude_skills", "Use skills from ~/.claude/skills", GENERAL, "bool", True, "GEMINI_CODE_CLAUDE_SKILLS",
+            help="Their names and descriptions are sent to Gemini at the start of each thread."),
     Setting("auto_approve", "Auto-approve everything", GENERAL, "bool", False, "GEMINI_CODE_AUTO_APPROVE",
             help="Writes, shell commands and network requests run WITHOUT asking. Leave off until you trust it.",
             off=None),

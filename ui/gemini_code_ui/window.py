@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 from . import theme
 from .agent import AgentProcess, ApiServerProcess, node_command, process_environment
 from .chat import ChatPage
-from .pages import ApiPage, LogsPage, MemoryPage, PlanPage, SettingsPage
+from .pages import ApiPage, LogsPage, MemoryPage, PlanPage, SettingsPage, SkillsPage
 from .picker import ModelPopup, picker_label
 from .settings import Settings
 
@@ -35,6 +35,7 @@ HELP = """Commands:
 /undo — revert the file changes from the last task
 /plan — open the plan
 /memory — open the project memory
+/skills — open skills, to see them or install more
 /remember <note> — add to the project memory
 /gems — refresh the list of Gems
 /gem <name> or /gem off — consult a Gem, or stop
@@ -93,6 +94,7 @@ class MainWindow(QMainWindow):
         self.chat = ChatPage()
         self.plan_page = PlanPage()
         self.memory_page = MemoryPage()
+        self.skills_page = SkillsPage()
         self.settings_page = SettingsPage(self.settings)
         self.api_page = ApiPage(self.settings)
         self.logs_page = LogsPage()
@@ -102,6 +104,7 @@ class MainWindow(QMainWindow):
             ("Chat", self.chat),
             ("Plan", self.plan_page),
             ("Memory", self.memory_page),
+            ("Skills", self.skills_page),
             ("Settings", self.settings_page),
             ("API server", self.api_page),
             ("Logs", self.logs_page),
@@ -142,6 +145,9 @@ class MainWindow(QMainWindow):
         self.plan_page.clear.connect(self.clear_plan)
         self.memory_page.refresh.connect(self.refresh_memory)
         self.memory_page.remember.connect(self.remember)
+        self.skills_page.find.connect(self.find_skills)
+        self.skills_page.install.connect(self.install_skills)
+        self.skills_page.remove.connect(self.remove_skill)
         self.settings_page.applied.connect(self.apply_settings)
         self.api_page.toggled.connect(self.toggle_api)
 
@@ -229,6 +235,8 @@ class MainWindow(QMainWindow):
             self.refresh_memory()
         elif page is self.settings_page:
             self.settings_page.form.reload()
+        elif page is self.skills_page:
+            self.refresh_skills()
 
     # --- state ----------------------------------------------------------
     def _set_state(self, state: str) -> None:
@@ -454,8 +462,9 @@ class MainWindow(QMainWindow):
         name, arg = name.lower(), arg.strip()
         if name == "help":
             self.chat.view.add_note(HELP)
-        elif name in ("plan", "memory"):
-            self.nav.setCurrentRow(1 if name == "plan" else 2)
+        elif name in ("plan", "memory", "skills"):
+            page = {"plan": self.plan_page, "memory": self.memory_page, "skills": self.skills_page}[name]
+            self.nav.setCurrentRow(self.pages.indexOf(page))
         elif name in ("clear", "new", "undo", "gems", "gem", "model", "thinking", "remember"):
             if self.state != "ready":
                 self.chat.view.add_note(f"/{name} has to wait until the task ends.", "warn")
@@ -612,6 +621,45 @@ class MainWindow(QMainWindow):
             self._show_gem()
 
         self.agent.command("gem", done, text=name)
+
+    def refresh_skills(self) -> None:
+        def done(reply: dict) -> None:
+            if reply.get("ok"):
+                self.skills_page.show_skills(reply["data"])
+            else:
+                self.skills_page.say(str(reply.get("error")))
+
+        self.agent.command("skills", done)
+
+    def find_skills(self, source: str) -> None:
+        def done(reply: dict) -> None:
+            if reply.get("ok"):
+                self.skills_page.show_found(reply["data"]["found"])
+            else:
+                self.skills_page.show_found(None, str(reply.get("error")))
+
+        self.agent.command("skill_find", done, text=source)
+
+    def install_skills(self, source: str, names: list) -> None:
+        def done(reply: dict) -> None:
+            if reply.get("ok"):
+                self.skills_page.installed([skill["name"] for skill in reply["data"]["installed"]])
+                self.refresh_skills()
+            else:
+                self.skills_page.installed(None, str(reply.get("error")))
+
+        self.agent.command("skill_install", done, text=source, names=names)
+
+    def remove_skill(self, name: str) -> None:
+        if not self._ask(f"Remove the skill {name}?"):
+            return
+
+        def done(reply: dict) -> None:
+            if not reply.get("ok"):
+                self.skills_page.say(str(reply.get("error")))
+            self.refresh_skills()
+
+        self.agent.command("skill_remove", done, text=name)
 
     def refresh_plan(self) -> None:
         def done(reply: dict) -> None:

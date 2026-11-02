@@ -14,6 +14,7 @@ import type { ModelMenu } from "../driver/models.js";
 import { ensureChromeRunning } from "../scripts/openChrome.js";
 import { createAskGemTool } from "../tools/askGem.js";
 import { killAllBackgroundProcesses } from "../tools/bash.js";
+import { skillSummaries } from "../tools/skills.js";
 import type { ToolDefinition } from "../types.js";
 import { setAsker, setQuestioner } from "../ui/prompt.js";
 import { Bridge, parseCommand, type BridgeHost, type Emit } from "./bridge.js";
@@ -81,6 +82,7 @@ async function startSession(emit: Emit, exit: () => Promise<void>) {
   const created = await ensureMemoryFile(tree);
   const docs = await collectProjectDocs();
   const resumable = await findResumablePlan();
+  let skills = await skillSummaries();
   await driver.markTab("🤖 gemini-code · main");
 
   // Empty means leave Gemini on whatever its picker already has selected.
@@ -130,7 +132,7 @@ async function startSession(emit: Emit, exit: () => Promise<void>) {
   const makeSession = (memory: string | undefined, resumePlan?: string) =>
     createMainSession({
       driver,
-      context: { tree, memory, docs, resumePlan },
+      context: { tree, memory, docs, resumePlan, skills },
       journal,
       modelAlias: () => modelName,
       gemTool: gemConsultant?.tool,
@@ -144,6 +146,8 @@ async function startSession(emit: Emit, exit: () => Promise<void>) {
   const freshThread = async () => {
     await driver.newConversation();
     const planning = session.inPlanMode;
+    // Re-read, so a skill installed since the last thread is in the next one.
+    skills = await skillSummaries();
     session = makeSession(await readMemory());
     session.setPlanMode(planning);
   };

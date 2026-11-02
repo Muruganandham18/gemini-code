@@ -11,7 +11,12 @@ export interface PrimerContext {
   docs?: ProjectDoc[];
   /** An unfinished plan from a previous run, for resuming interrupted work. */
   resumePlan?: string;
+  /** Installed skills. Only these two fields: the rest loads through use_skill. */
+  skills?: { name: string; description: string }[];
 }
+
+const MAX_SKILLS_LISTED = 40;
+const MAX_SKILL_DESCRIPTION_CHARS = 240;
 
 /**
  * The RULES half of the primer: tool list + the tool-call protocol.
@@ -149,6 +154,18 @@ export function buildContextDocument(context: PrimerContext): string | undefined
       `## Project documentation\n\n` +
         `The project's own markdown files, as initial knowledge about intent and conventions.\n\n` +
         docSections
+    );
+  }
+
+  if (context.skills?.length) {
+    const shown = context.skills.slice(0, MAX_SKILLS_LISTED);
+    const more = context.skills.length - shown.length;
+    const list = shown
+      .map((s) => `- ${s.name}${s.description ? `: ${s.description.slice(0, MAX_SKILL_DESCRIPTION_CHARS)}` : ""}`)
+      .join("\n");
+    sections.push(
+      `## Skills\n\nInstructions for particular kinds of task. When one fits, load it with use_skill and follow it ` +
+        `rather than working it out yourself.\n\n${list}${more ? `\n\n(${more} more: call use_skill with no name.)` : ""}`
     );
   }
 

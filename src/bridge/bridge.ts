@@ -4,6 +4,8 @@ import { appendMemory, readMemory } from "../context/memory.js";
 import { clearPlan, readPlan } from "../context/plan.js";
 import { readClipboardImageDetailed } from "../context/clipboard.js";
 import type { ModelMenu } from "../driver/models.js";
+import { discoverSkills, installSkills, listInstalled, removeSkill } from "../tools/skillInstall.js";
+import { findSkills } from "../tools/skills.js";
 import { setAsker, setQuestioner } from "../ui/prompt.js";
 
 /**
@@ -61,6 +63,10 @@ const DURING_TASK = new Set([
   "plan",
   "memory",
   "remember",
+  "skills",
+  "skill_find",
+  "skill_install",
+  "skill_remove",
   "paste_image",
   "shutdown",
 ]);
@@ -239,6 +245,30 @@ export class Bridge {
 
       case "plan":
         return { plan: (await readPlan())?.raw ?? null };
+
+      // These come from the app's Skills page. The agent has no way to send
+      // them, because a skill is instructions it would go on to follow.
+      case "skills": {
+        const installed = await listInstalled();
+        const known = new Set(installed.map((skill) => skill.name));
+        const others = [...(await findSkills()).values()].filter((skill) => !known.has(skill.name));
+        return {
+          installed,
+          others: others.map(({ name, description, source }) => ({ name, description, source })),
+        };
+      }
+
+      case "skill_find":
+        return { found: await discoverSkills(text) };
+
+      case "skill_install": {
+        const names = Array.isArray(command.names) ? command.names.map(String) : [];
+        return { installed: await installSkills(text, names) };
+      }
+
+      case "skill_remove":
+        await removeSkill(text);
+        return undefined;
 
       case "plan_clear":
         await clearPlan();
