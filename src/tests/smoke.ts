@@ -82,6 +82,10 @@ async function test(name: string, fn: () => Promise<void> | void) {
     failed++;
     console.log(`  FAIL - ${name}`);
     console.log(`    ${(err as Error).stack ?? err}`);
+    // Shows on the run's page, where logs alone need a sign-in to read.
+    if (process.env.GITHUB_ACTIONS) {
+      console.log(`::error title=${name}::${String((err as Error).message ?? err).slice(0, 800).replace(/\r?\n/g, "%0A")}`);
+    }
   }
 }
 
