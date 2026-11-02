@@ -238,6 +238,7 @@ Semantic versioning, reported by `gemini-code --version`.
 
 | Version | Highlights |
 | --- | --- |
+| **0.9.0** | Claude-compatible skills, installed from GitHub with `gemini-code skills add` or the app's Skills page |
 | **0.8.2** | desktop app and standalone Windows exe, on-demand tool loading with `tool_search`, 40 tools including plan mode, `ask_user`, notebooks, skills and git history, model picker read live from Gemini |
 | **0.4.1** | Windows: commands run in the same console with output captured, Git Bash preferred over cmd, process trees killed properly |
 | **0.4.0** | command output saved to searchable logs; errors surfaced from anywhere in a long build |
@@ -324,6 +325,7 @@ Typing **while a task runs** steers it — your text is folded into the next tur
 | `GEMINI_CODE_DRIFT_NUDGES` | `2` | nudges when a reply abandons the protocol |
 | `GEMINI_CODE_BASH_TIMEOUT_MS` | `60000` | foreground command timeout |
 | `GEMINI_CODE_SHELL` | Git Bash on Windows, else `sh` | shell commands run in (e.g. `powershell.exe`) |
+| `GEMINI_CODE_CLAUDE_SKILLS` | `1` | `0` = don't use skills from `~/.claude/skills` |
 
 ## Use it as an OpenAI-compatible API
 
@@ -433,6 +435,7 @@ you to sign in by hand; the app carries on by itself once you have.
 | **Chat** | Tasks and questions, live tool activity, rendered answers, and Allow/Deny for each write, command and network request. Typing during a task steers it, and **Stop** ends it before the next turn. Attach images with the button, by pasting, or by dropping them on the composer. The terminal's slash commands work; `/help` lists them. |
 | **Plan** | `GEMINI-PLAN.md`, the journal of the current task |
 | **Memory** | `GEMINI.md`, the durable project memory |
+| **Skills** | Your skills, and installing more from GitHub |
 | **Settings** | Every `GEMINI_CODE_*` variable in [Environment](#environment), with the same defaults. Model and thinking live in the composer's picker instead |
 | **API server** | Start and stop `gemini-code serve`, with its address, port, tabs, key and CORS origins |
 | **Logs** | Everything the agent reported |
@@ -484,7 +487,7 @@ the work.
 | TodoWrite | `update_plan` | core |
 | AskUserQuestion | `ask_user` | on demand |
 | EnterPlanMode, ExitPlanMode | `enter_plan_mode`, `exit_plan_mode` | on demand |
-| Skill | `use_skill` | on demand |
+| Skill | `use_skill`, see [Skills](#skills) | core |
 | ToolSearch | `tool_search` | core |
 | LSP | `code_outline`, `find_symbol`: pattern-based, not a language server | on demand |
 | git through Bash | `git_status`, `git_diff`, and read-only `git_log`, `git_show`, `git_blame` | core, on demand |
@@ -500,11 +503,40 @@ until someone decides it's safe. Gemini can enter it with `enter_plan_mode`, or 
 with the **Plan mode** button in the app. It ends when you approve a plan through
 `exit_plan_mode`.
 
-**Skills.** A skill is reusable instructions for a kind of task, in
-`.gemini-code/skills/<name>/SKILL.md` or `.claude/skills/<name>/SKILL.md` in the project,
-or `~/.gemini-code/skills/<name>/SKILL.md` for all of them. `use_skill` lists and reads them.
-
 Not here: MCP servers, git worktrees, and scheduled or cloud agents.
+
+## Skills
+
+Skills use the same format as Claude Code: a folder with a `SKILL.md`, plus whatever scripts
+and references it bundles. Install them from any public GitHub repository:
+
+```bash
+gemini-code skills add anthropics/skills --only=pdf,docx
+gemini-code skills add https://github.com/owner/repo/tree/main/skills/my-skill
+gemini-code skills list
+gemini-code skills remove pdf
+```
+
+In the desktop app, the **Skills** page does the same: paste a repository, tick what you
+want, and install. A repository with several skills asks which you want, and `--all` takes
+them all. Installed skills go in `~/.gemini-code/skills`.
+
+Skills are also picked up from `.gemini-code/skills` and `.claude/skills` in the project and
+from `~/.claude/skills`, so what you already have for Claude Code works here. Gemini sees
+each skill's name and description at the start of a thread and loads the rest with
+`use_skill` when one fits, including its bundled files. `${CLAUDE_SKILL_DIR}`, `{baseDir}`
+and `$ARGUMENTS` work, and Claude Code's tool names are translated to the ones here.
+
+Worth knowing:
+
+- **A skill is instructions the agent follows, so only install ones you trust.** Installing
+  shows how many scripts a skill bundles. Running one still asks first, like any command.
+- **Only you can install a skill.** No tool does it, so a page Gemini reads can't add one.
+- **Names and descriptions go to Gemini**, including those in `~/.claude/skills`. Turn that
+  folder off with `GEMINI_CODE_CLAUDE_SKILLS=0`, or in Settings.
+- **Some skills can't work here.** One that depends on a Claude-only feature, or on a tool
+  that doesn't exist here, will run into that when followed.
+- New skills join Gemini's list at the next new chat.
 
 ## How it works
 

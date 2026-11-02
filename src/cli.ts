@@ -18,6 +18,8 @@ import {
 } from "./driver/models.js";
 import { tools } from "./tools/index.js";
 import { killAllBackgroundProcesses } from "./tools/bash.js";
+import { discoverSkills, installSkills, listInstalled, removeSkill } from "./tools/skillInstall.js";
+import { findSkills, skillSummaries } from "./tools/skills.js";
 import { MAX_PARALLEL_WORKERS } from "./agent/workers.js";
 import { createAskGemTool } from "./tools/askGem.js";
 import type { ToolDefinition } from "./types.js";
@@ -34,7 +36,7 @@ import { existsSync } from "node:fs";
 const ORCHESTRATOR_MODE = process.env.GEMINI_CODE_ORCHESTRATOR !== "0";
 
 /** Kept in step with package.json by `npm version`. */
-export const VERSION = "0.8.2";
+export const VERSION = "0.9.0";
 import { openChrome, ensureChromeRunning } from "./scripts/openChrome.js";
 import { checkLogin } from "./scripts/login.js";
 import { c } from "./ui/format.js";
@@ -161,10 +163,11 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
 `);
 
   const journal = new PlanJournal();
+  let skills = await skillSummaries();
   const makeMainSession = (mem: string | undefined, resumePlan?: string) =>
     createMainSession({
       driver,
-      context: { tree, memory: mem, docs, resumePlan },
+      context: { tree, memory: mem, docs, resumePlan, skills },
       journal,
       modelAlias: () => startModel,
       gemTool: gemConsultant?.tool,
@@ -426,6 +429,7 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
               await driver.newConversation();
               // A fresh thread has no memory of the primer, so the next task
               // must re-send it — that's what a new AgentSession does.
+              skills = await skillSummaries();
               session = makeMainSession(await readMemory());
               console.log(`  ${c.green("✓")} fresh conversation thread\n`);
               break;
@@ -566,6 +570,11 @@ Usage:
       --tabs <n>              parallel Gemini tabs = concurrent requests (default 2)
       --api-key <key>         require "Authorization: Bearer <key>"
       --cors-origin <url>     let a browser app at <url> call it (repeatable)
+  gemini-code skills list     show the skills Gemini can use
+  gemini-code skills add <owner/repo or GitHub URL> [--all] [--only=a,b]
+                              install Claude-compatible skills from GitHub
+  gemini-code skills remove <name>
+                              remove an installed skill
   gemini-code bridge          run the agent over JSON lines on stdin/stdout (the desktop UI uses this)
   gemini-code open-chrome     open a normal Chrome window to sign into (do this first)
   gemini-code login           check that the signed-in Chrome is reachable
@@ -580,6 +589,50 @@ Environment:
   GEMINI_CODE_API_KEY         same as serve --api-key
   GEMINI_CODE_API_PORT, GEMINI_CODE_API_HOST, GEMINI_CODE_API_TABS, GEMINI_CODE_API_CORS
 `;
+
+/** `gemini-code skills`: installing is the user's to do, so it's a command, not a tool. */
+async function skillsCommand(): Promise<void> {
+  const [action, ...rest] = process.argv.slice(3);
+  const flags = rest.filter((arg) => arg.startsWith("--"));
+  const [target] = rest.filter((arg) => !arg.startsWith("--"));
+
+  if (action === "list" || !action) {
+    const installed = await listInstalled();
+    const others = [...(await findSkills()).values()].filter((s) => !installed.some((i) => i.name === s.name));
+    if (!installed.length && !others.length) console.log(`No skills yet. Add one with: gemini-code skills add <github repo>`);
+    for (const s of installed) console.log(`${c.cyan(s.name)} ${c.dim(s.source ?? "")}\n  ${s.description}`);
+    for (const s of others) console.log(`${c.cyan(s.name)} ${c.dim(`(${s.source})`)}\n  ${s.description}`);
+    return;
+  }
+
+  if (action === "remove" && target) {
+    await removeSkill(target);
+    console.log(`  ${c.green("✓")} removed ${target}`);
+    return;
+  }
+
+  if (action === "add" && target) {
+    const only = flags.find((flag) => flag.startsWith("--only="))?.slice("--only=".length).split(",");
+    const found = await discoverSkills(target);
+    if (!found.length) throw new Error(`No skills found in ${target}. A skill is a folder with a SKILL.md.`);
+    if (found.length > 1 && !only && !flags.includes("--all")) {
+      console.log(`${target} has ${found.length} skills:\n`);
+      for (const s of found) console.log(`  ${c.cyan(s.name)}\n    ${s.description.slice(0, 100)}`);
+      console.log(`\nChoose with --only=<name>,<name> or install them all with --all.`);
+      process.exitCode = 1;
+      return;
+    }
+    const installed = await installSkills(target, only ?? found.map((s) => s.name));
+    for (const s of installed) {
+      const scripts = s.scripts.length ? ` ${c.yellow(`(${s.scripts.length} script${s.scripts.length > 1 ? "s" : ""} it may ask to run)`)}` : "";
+      console.log(`  ${c.green("✓")} ${s.name}${scripts}`);
+    }
+    return;
+  }
+
+  console.error(`Usage:\n  gemini-code skills list\n  gemini-code skills add <owner/repo or GitHub URL> [--all] [--only=a,b]\n  gemini-code skills remove <name>`);
+  process.exitCode = 1;
+}
 
 /** `gemini-code serve`: the OpenAI-compatible API. */
 async function serve(): Promise<void> {
@@ -647,6 +700,8 @@ async function cli(): Promise<void> {
       return serve();
     case "bridge":
       return runBridge();
+    case "skills":
+      return skillsCommand();
     case "open-chrome":
       return void openChrome();
     case "login":

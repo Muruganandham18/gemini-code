@@ -302,6 +302,64 @@ def the_plan_mode_toggle_follows_the_agent():
     close(window)
 
 
+def open_skills(window):
+    window.nav.setCurrentRow(window.pages.indexOf(window.skills_page))
+    return window.skills_page
+
+
+def page_text(page):
+    return "\n".join(label.text() for label in page.findChildren(QLabel))
+
+
+@test
+def the_skills_page_shows_claude_skills_and_installs_from_github():
+    window = make_window()
+    page = open_skills(window)
+    wait_for(lambda: "synced" in page_text(page))
+
+    page.field.setText("anthropics/skills")
+    page.find_button.click()
+    wait_for(lambda: list(page.choices) == ["pdf", "docx"])
+    assert "Includes 1 script it may ask to run." in page_text(page)
+    assert not page.choices["pdf"].isChecked(), "with several, nothing is chosen for you"
+    shot(window, "skills")
+
+    page.choices["pdf"].setChecked(True)
+    page.install_button.click()
+    wait_for(lambda: "Installed pdf." in page.message.text())
+    wait_for(lambda: "anthropics/skills" in page_text(page))
+    assert not page.choices and not page.field.text()
+    close(window)
+
+
+@test
+def a_failed_lookup_says_why_and_can_be_retried():
+    window = make_window()
+    page = open_skills(window)
+    page.field.setText("nobody/missing")
+    page.field.returnPressed.emit()
+    wait_for(lambda: "Not found" in page.message.text())
+    assert page.find_button.isEnabled()
+    close(window)
+
+
+@test
+def a_skill_can_be_removed_after_asking():
+    window = make_window()
+    page = open_skills(window)
+    page.source = "a/b"
+    window.install_skills("a/b", ["temp"])
+    wait_for(lambda: "temp" in page_text(page))
+    original = QMessageBox.question
+    QMessageBox.question = staticmethod(lambda *a: QMessageBox.StandardButton.Yes)
+    try:
+        page.remove.emit("temp")
+        wait_for(lambda: "<b>temp</b>" not in page_text(page))
+    finally:
+        QMessageBox.question = original
+    close(window)
+
+
 @test
 def stop_closes_the_pending_approval():
     window = make_window()

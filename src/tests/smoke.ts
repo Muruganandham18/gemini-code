@@ -8,6 +8,7 @@
  * selector calibration (see README.md).
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseGeminiReply, looksLikeAbandonedWork, looksUnfinished } from "../agent/toolCallParser.js";
@@ -28,7 +29,8 @@ import { createPlanModeTools, READ_ONLY_TOOLS } from "../tools/planMode.js";
 import { copyFileTool, deleteFileTool, fileInfoTool, findFilesTool, moveFileTool, readFilesTool } from "../tools/files.js";
 import { notebookEditTool, notebookReadTool } from "../tools/notebook.js";
 import { codeOutlineTool, findSymbolTool, outline } from "../tools/code.js";
-import { useSkillTool } from "../tools/skills.js";
+import { findSkills, parseFrontmatter, renderSkill, useSkillTool } from "../tools/skills.js";
+import { discoverSkills, installSkills, listInstalled, parseSkillSource, removeSkill } from "../tools/skillInstall.js";
 import { askUserTool } from "../tools/askUser.js";
 import { checkpoints } from "../context/checkpoint.js";
 import { bashTool, checkOutputTool, killProcessTool, looksLongRunning, resolveShell, waitForOutputTool } from "../tools/bash.js";
@@ -2082,6 +2084,194 @@ async function main() {
     } finally {
       await rm(path.resolve(".gemini-code"), { recursive: true, force: true });
     }
+  });
+
+  console.log("Skills:");
+  /** Writes files under a fresh folder. Each key is a path, each value its content. */
+  const tree = async (files: Record<string, string>) => {
+    const base = path.resolve(".tmp-test", `skill-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`);
+    for (const [name, content] of Object.entries(files)) {
+      await mkdir(path.dirname(path.join(base, name)), { recursive: true });
+      await writeFile(path.join(base, name), content);
+    }
+    await mkdir(base, { recursive: true });
+    return base;
+  };
+  /** Stands in for GitHub: a real archive, laid out the way codeload's are. */
+  const fakeGithub = async (files: Record<string, string>) => {
+    const prefixed = Object.fromEntries(Object.entries(files).map(([k, v]) => [`repo-main/${k}`, v]));
+    const base = await tree(prefixed);
+    await tree({});
+    const system = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
+    execFileSync(process.platform === "win32" ? system : "tar", ["-czf", path.join(base, "repo.tgz"), "-C", base, "repo-main"]);
+    return { home: await tree({}), download: async (_url: string, file: string) => writeFile(file, await readFile(path.join(base, "repo.tgz"))) };
+  };
+  const skillMd = (name: string, description: string, body = "Do the thing.") =>
+    `---\nname: ${name}\ndescription: ${description}\n---\n${body}\n`;
+
+  await test("reads every way of naming a GitHub skill", () => {
+    assert.deepEqual(parseSkillSource("anthropics/skills"), { owner: "anthropics", repo: "skills" });
+    assert.deepEqual(parseSkillSource("https://github.com/anthropics/skills.git"), { owner: "anthropics", repo: "skills" });
+    assert.deepEqual(parseSkillSource("a/b/skills/pdf"), { owner: "a", repo: "b", subpath: "skills/pdf" });
+    assert.deepEqual(parseSkillSource("a/b@v2"), { owner: "a", repo: "b", ref: "v2" });
+    assert.deepEqual(parseSkillSource("https://github.com/a/b/tree/main/skills/pdf/"), {
+      owner: "a", repo: "b", ref: "main", subpath: "skills/pdf",
+    });
+    assert.deepEqual(parseSkillSource("https://github.com/a/b/blob/dev/x/SKILL.md"), { owner: "a", repo: "b", ref: "dev", subpath: "x" });
+  });
+
+  await test("refuses anything that isn't a GitHub repository", () => {
+    for (const bad of ["", "justaname", "https://evil.example/a/b", "a/b/../../etc", "a b/c"]) {
+      assert.throws(() => parseSkillSource(bad), /isn't a GitHub repository/, bad);
+    }
+  });
+
+  await test("reads frontmatter, quoted and folded onto several lines", () => {
+    assert.deepEqual(parseFrontmatter(`---\nname: "pdf"\ndescription: >\n  Reads PDFs\n  and fills forms\nlicense: MIT\n---\nBody`), {
+      name: "pdf",
+      description: "Reads PDFs and fills forms",
+      license: "MIT",
+    });
+    assert.deepEqual(parseFrontmatter("no frontmatter here"), {});
+  });
+
+  await test("finds skills in the project, at home and in Claude's folder, project first", async () => {
+    const root = await tree({
+      ".gemini-code/skills/mine/SKILL.md": skillMd("mine", "Project one"),
+      ".claude/skills/shared/SKILL.md": skillMd("shared", "From the project"),
+    });
+    const home = await tree({ "skills/installed/SKILL.md": skillMd("installed", "Installed") });
+    const claude = await tree({
+      "skills/synced/nested/SKILL.md": skillMd("nested", "Deep in a folder"),
+      "skills/shared/SKILL.md": skillMd("shared", "From home"),
+    });
+    const found = await findSkills(root, home, claude);
+    assert.deepEqual([...found.keys()].sort(), ["installed", "mine", "nested", "shared"]);
+    assert.equal(found.get("shared")?.description, "From the project");
+    assert.equal(found.get("nested")?.source, "claude");
+  });
+
+  await test("Claude's own skills can be turned off", async () => {
+    const claude = await tree({ "skills/hidden/SKILL.md": skillMd("hidden", "Private") });
+    process.env.GEMINI_CODE_CLAUDE_SKILLS = "0";
+    try {
+      assert.equal((await findSkills(await tree({}), await tree({}), claude)).size, 0);
+    } finally {
+      delete process.env.GEMINI_CODE_CLAUDE_SKILLS;
+    }
+  });
+
+  await test("a skill loads with its folder, its files and Claude's tool names translated", async () => {
+    const root = await tree({
+      ".gemini-code/skills/pdf/SKILL.md": skillMd("pdf", "PDFs", "Run ${CLAUDE_SKILL_DIR}/scripts/go.py on $ARGUMENTS. See {baseDir}/ref.md"),
+      ".gemini-code/skills/pdf/scripts/go.py": "print(1)",
+      ".gemini-code/skills/pdf/ref.md": "reference",
+    });
+    const skill = (await findSkills(root, await tree({}), await tree({}))).get("pdf")!;
+    const text = await renderSkill(skill, "invoice.pdf");
+    const dir = skill.dir!.split(path.sep).join("/");
+    assert.ok(text.includes(`Run ${dir}/scripts/go.py on invoice.pdf. See ${dir}/ref.md`), text);
+    assert.match(text, /It bundles: .*scripts\/go\.py/);
+    assert.match(text, /Read=read_file/);
+    assert.ok(!text.includes("description: PDFs"), "the frontmatter isn't instructions");
+  });
+
+  await test("arguments reach a skill that doesn't ask for them by name", async () => {
+    const root = await tree({ ".gemini-code/skills/plain/SKILL.md": skillMd("plain", "x") });
+    const skill = (await findSkills(root, await tree({}), await tree({}))).get("plain")!;
+    assert.match(await renderSkill(skill, "extra"), /Arguments given: extra/);
+  });
+
+  await test("use_skill reads bundled files, and only those", async () => {
+    const dir = path.resolve(".gemini-code", "skills", "bundle");
+    await mkdir(path.join(dir, "refs"), { recursive: true });
+    try {
+      await writeFile(path.join(dir, "SKILL.md"), skillMd("bundle", "x"));
+      await writeFile(path.join(dir, "refs", "a.md"), "bundled text");
+      assert.equal((await useSkillTool.run({ name: "bundle", file: "refs/a.md" })).output, "bundled text");
+      for (const file of ["../../../package.json", "..", "missing.md", path.resolve("package.json")]) {
+        assert.equal((await useSkillTool.run({ name: "bundle", file })).ok, false, file);
+      }
+    } finally {
+      await rm(path.resolve(".gemini-code"), { recursive: true, force: true });
+    }
+  });
+
+  await test("discovering a repo installs nothing, and shows what it would run", async () => {
+    const github = await fakeGithub({
+      "README.md": "not a skill",
+      "skills/pdf/SKILL.md": skillMd("pdf", "Reads PDFs"),
+      "skills/pdf/scripts/fill.py": "x",
+      "skills/docx/SKILL.md": skillMd("docx", "Reads Word files"),
+    });
+    const found = await discoverSkills("a/b", github);
+    assert.deepEqual(found.map((s) => s.name), ["docx", "pdf"]);
+    assert.deepEqual(found[1].scripts, ["scripts/fill.py"]);
+    assert.deepEqual(await listInstalled(github.home), []);
+  });
+
+  await test("installs what's chosen, with its files, and won't guess among several", async () => {
+    const github = await fakeGithub({
+      "skills/pdf/SKILL.md": skillMd("pdf", "Reads PDFs"),
+      "skills/pdf/scripts/fill.py": "print('fill')",
+      "skills/docx/SKILL.md": skillMd("docx", "Reads Word files"),
+    });
+    await assert.rejects(installSkills("a/b", [], github), /has 2 skills, so choose/);
+    await assert.rejects(installSkills("a/b", ["nope"], github), /Not in that repository: nope/);
+
+    await installSkills("a/b", ["pdf"], github);
+    const installed = await listInstalled(github.home);
+    assert.deepEqual(installed.map((s) => [s.name, s.source]), [["pdf", "a/b"]]);
+    assert.equal(await readFile(path.join(github.home, "skills", "pdf", "scripts", "fill.py"), "utf8"), "print('fill')");
+  });
+
+  await test("a repo that is one skill, or one folder of a repo, installs directly", async () => {
+    const single = await fakeGithub({ "SKILL.md": "# no frontmatter", "helper.md": "x" });
+    assert.deepEqual((await installSkills("me/my-skill", [], single)).map((s) => s.name), ["my-skill"]);
+
+    const many = await fakeGithub({ "x/one/SKILL.md": skillMd("one", "1"), "x/two/SKILL.md": skillMd("two", "2") });
+    assert.deepEqual((await installSkills("a/b/x/two", [], many)).map((s) => s.name), ["two"]);
+    await assert.rejects(installSkills("a/b/missing", [], many), /no folder "missing"/);
+  });
+
+  await test("reinstalling replaces the old copy, and removing deletes only that skill", async () => {
+    const first = await fakeGithub({ "SKILL.md": skillMd("demo", "v1"), "old.md": "x" });
+    await installSkills("a/demo", [], first);
+    const second = await fakeGithub({ "SKILL.md": skillMd("demo", "v2") });
+    await installSkills("a/demo", [], { ...second, home: first.home });
+    assert.equal((await listInstalled(first.home))[0].description, "v2");
+    await assert.rejects(readFile(path.join(first.home, "skills", "demo", "old.md"), "utf8"));
+
+    await assert.rejects(removeSkill("other", first.home), /isn't installed/);
+    await removeSkill("demo", first.home);
+    assert.deepEqual(await listInstalled(first.home), []);
+  });
+
+  await test("a skill's name can't put it outside the skills folder", async () => {
+    const github = await fakeGithub({ "SKILL.md": skillMd("../../escaped", "x") });
+    await installSkills("a/b", [], github);
+    await assert.rejects(readFile(path.join(github.home, "..", "escaped", "SKILL.md"), "utf8"));
+    assert.equal((await listInstalled(github.home)).length, 1);
+  });
+
+  await test("a repo with no skills says so", async () => {
+    const github = await fakeGithub({ "README.md": "nothing" });
+    await assert.rejects(installSkills("a/b", [], github), /No skills found/);
+  });
+
+  await test("nothing Gemini can call installs a skill", () => {
+    assert.ok(!tools.some((t) => /install|skill_add/i.test(t.name)));
+    assert.ok(!READ_ONLY_TOOLS.has("skill_install"));
+  });
+
+  await test("the context lists skills, and caps how many", () => {
+    const skills = Array.from({ length: 45 }, (_, i) => ({ name: `s${i}`, description: "d".repeat(500) }));
+    const doc = buildContextDocument({ skills })!;
+    assert.match(doc, /load it with use_skill/);
+    assert.match(doc, /- s39:/);
+    assert.ok(!doc.includes("- s40:"));
+    assert.match(doc, /5 more/);
+    assert.ok(!doc.includes("d".repeat(300)), "a long description is cut");
   });
 
   console.log("Desktop bridge:");

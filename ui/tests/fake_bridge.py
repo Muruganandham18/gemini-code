@@ -35,6 +35,7 @@ thinking = [
     {"name": "High", "description": "Extra thorough", "selected": False},
 ]
 reads = 0
+installed_skills = []
 
 
 def menu():
@@ -134,6 +135,22 @@ def main():
             finish(answer=f"Using {command['text']}.")
         elif cmd == "plan_mode":
             data = {"on": command["on"]}
+        elif cmd == "skills":
+            data = {"installed": installed_skills, "others": [{"name": "synced", "description": "From Claude", "source": "claude"}]}
+        elif cmd == "skill_find":
+            if "missing" in command["text"]:
+                emit(type="reply", id=cid, ok=False, error="Not found. Check the name, and that the repository is public.")
+                continue
+            data = {"found": [
+                {"name": "pdf", "description": "Reads PDFs.", "path": "skills/pdf", "files": ["fill.py"], "scripts": ["fill.py"]},
+                {"name": "docx", "description": "Reads Word files.", "path": "skills/docx", "files": [], "scripts": []},
+            ]}
+        elif cmd == "skill_install":
+            for name in command["names"]:
+                installed_skills.append({"name": name, "description": "Installed.", "source": command["text"]})
+            data = {"installed": [{"name": name} for name in command["names"]]}
+        elif cmd == "skill_remove":
+            installed_skills[:] = [s for s in installed_skills if s["name"] != command["text"]]
         elif cmd == "stop":
             if waiting == "confirm":
                 emit(type="confirm_closed", id=1)
