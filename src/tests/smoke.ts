@@ -15,16 +15,34 @@ import { formatToolResult, buildContextDocument, buildSystemPrimer } from "../ag
 import { AgentSession } from "../agent/loop.js";
 import type { IGeminiDriver, GeminiResponse } from "../driver/IGeminiDriver.js";
 import { readFileTool } from "../tools/readFile.js";
-import { editFileTool } from "../tools/editFile.js";
-import { searchCodeTool, globToRegExp } from "../tools/searchCode.js";
+import { editFileTool, multiEditTool } from "../tools/editFile.js";
+import { searchCode, searchCodeTool, globToRegExp } from "../tools/searchCode.js";
 import { detectEol, findSpans, reindent, nearestContext } from "../tools/matchText.js";
-import { gitStatusTool, gitDiffTool } from "../tools/git.js";
+import { gitStatusTool, gitDiffTool, gitLogTool, gitShowTool, gitBlameTool } from "../tools/git.js";
 import { writeFileTool } from "../tools/writeFile.js";
 import { listFilesTool } from "../tools/listFiles.js";
-import { bashTool, checkOutputTool, killProcessTool, looksLongRunning, resolveShell } from "../tools/bash.js";
+import { tools } from "../tools/index.js";
+import type { ToolDefinition } from "../types.js";
+import { createToolSearchTool } from "../tools/toolSearch.js";
+import { createPlanModeTools, READ_ONLY_TOOLS } from "../tools/planMode.js";
+import { copyFileTool, deleteFileTool, fileInfoTool, findFilesTool, moveFileTool, readFilesTool } from "../tools/files.js";
+import { notebookEditTool, notebookReadTool } from "../tools/notebook.js";
+import { codeOutlineTool, findSymbolTool, outline } from "../tools/code.js";
+import { useSkillTool } from "../tools/skills.js";
+import { askUserTool } from "../tools/askUser.js";
+import { checkpoints } from "../context/checkpoint.js";
+import { bashTool, checkOutputTool, killProcessTool, looksLongRunning, resolveShell, waitForOutputTool } from "../tools/bash.js";
 import { fetchUrlTool } from "../tools/fetchUrl.js";
 import { webSearchTool, parseResults } from "../tools/webSearch.js";
-import { resolveModel, DEFAULT_MODEL_ALIAS, EXTENDED_THINKING } from "../driver/models.js";
+import {
+  resolveModel,
+  DEFAULT_MODEL_ALIAS,
+  EXTENDED_THINKING,
+  menuRowMatches,
+  parseModelRows,
+  parseThinkingRows,
+  type MenuRow,
+} from "../driver/models.js";
 import { resolveGem } from "../driver/GeminiDriver.js";
 import { createAskGemTool } from "../tools/askGem.js";
 import { gemFlag, gemModeFlag, serveArgs } from "../args.js";
@@ -47,9 +65,10 @@ import { isImagePath, normalizeDroppedPath } from "../context/clipboard.js";
 import { CheckpointStore } from "../context/checkpoint.js";
 import { createUpdatePlanTool } from "../tools/updatePlan.js";
 import { confirmAction } from "../tools/confirm.js";
-import { setAsker } from "../ui/prompt.js";
+import { setAsker, setQuestioner } from "../ui/prompt.js";
 import { PlanJournal, readPlan, findResumablePlan, clearPlan } from "../context/plan.js";
 import { runParallelTasks, createDelegateTool, MAX_WORKER_REPORT_CHARS } from "../agent/workers.js";
+import { Bridge, classifyActivity, parseQuestion, type BridgeEvent, type BridgeHost } from "../bridge/bridge.js";
 
 let passed = 0;
 let failed = 0;
@@ -1330,6 +1349,36 @@ async function main() {
     assert.ok(!EXTENDED_THINKING.labelMarker.test("Flash"));
   });
 
+  // Rows as read from a live free-plan picker, Nov 2026.
+  const liveMenu: MenuRow[] = [
+    { text: "", testId: "local-images-files-uploader-button", selected: false },
+    { text: "Auto\nGemini 3 models", testId: "bard-mode-option-cf41b0e0dd7d53e5", selected: true },
+    { text: "3.1 Pro\nAdvanced reasoning", testId: "bard-mode-option-upsell_MODE_CATEGORY_PRO", selected: false },
+    { text: "4 Argon\nComplex tasks", testId: "bard-mode-option-upsell_MODE_CATEGORY_ULTRA", selected: false },
+    { text: "Thinking level", testId: "", selected: false },
+  ];
+
+  await test("reads the live menu, marking models above the plan as locked", () => {
+    assert.deepEqual(parseModelRows(liveMenu), [
+      { name: "Auto", description: "Gemini 3 models", selected: true, locked: false },
+      { name: "3.1 Pro", description: "Advanced reasoning", selected: false, locked: true },
+      { name: "4 Argon", description: "Complex tasks", selected: false, locked: true },
+    ]);
+  });
+
+  await test("reads thinking levels from the submenu", () => {
+    const levels = parseThinkingRows([{ text: "Low\nQuick and efficient", testId: "", selected: true }]);
+    assert.deepEqual(levels, [{ name: "Low", description: "Quick and efficient", selected: true }]);
+  });
+
+  await test("a picker row answers to its own name, or a friendly alias", () => {
+    assert.ok(menuRowMatches("3.1 Pro", "3.1 Pro\nAdvanced reasoning"));
+    assert.ok(menuRowMatches("pro", "3.1 Pro\nAdvanced reasoning"));
+    assert.ok(menuRowMatches("fast", "Auto\nGemini 3 models"), "the default must work on an Auto-only picker");
+    assert.ok(!menuRowMatches("4 Argon", "3.1 Pro\nAdvanced reasoning"));
+    assert.ok(!menuRowMatches("fast", "Thinking level"));
+  });
+
   console.log("Gems:");
   await test("picks a Gem by id, exact name or unambiguous partial", () => {
     const gems = [
@@ -1705,6 +1754,530 @@ async function main() {
       startServer({ driver: makeFakeDriver([]) as never, host: "0.0.0.0", port: 18999, tabs: 1, allowedOrigins: [], log: () => {} }),
       /without an API key/
     );
+  });
+
+  /** Runs with real prompts, answering from a list the test fills in. */
+  const withPrompts = async (fn: (answers: string[]) => Promise<void>) => {
+    const answers: string[] = [];
+    delete process.env.GEMINI_CODE_AUTO_APPROVE;
+    setAsker(async () => answers.shift() ?? "");
+    try {
+      await fn(answers);
+    } finally {
+      process.env.GEMINI_CODE_AUTO_APPROVE = "1";
+      setAsker(undefined);
+    }
+  };
+
+  console.log("On-demand tools:");
+  const sessionReplies = (replies: GeminiResponse[], extra: ToolDefinition[] = []) => {
+    const driver = new FakeDriver(replies);
+    return { driver, session: new AgentSession(driver, {}, extra) };
+  };
+  const echo = (ran: string[]): ToolDefinition => ({
+    name: "echo_later",
+    deferred: true,
+    description: "echo_later(args: {text: string}) -> says it back. UNIQUE-ECHO-DOC",
+    async run(args) {
+      ran.push(String(args.text));
+      return { ok: true, output: "echoed" };
+    },
+  });
+
+  await test("the primer names deferred tools without describing them", () => {
+    const primer = buildSystemPrimer(tools);
+    for (const tool of tools) {
+      assert.ok(primer.includes(tool.name), `${tool.name} isn't even named`);
+      assert.equal(primer.includes(tool.description), !tool.deferred, tool.name);
+    }
+    assert.ok(primer.includes("tool_search"));
+  });
+
+  await test("every tool describes its own name and args", () => {
+    assert.equal(new Set(tools.map((t) => t.name)).size, tools.length, "duplicate tool name");
+    for (const tool of tools) assert.ok(tool.description.startsWith(`${tool.name}(`), tool.name);
+  });
+
+  await test("keywords find a tool, and select loads several at once", async () => {
+    const loaded = new Set<string>();
+    const search = createToolSearchTool(() => tools, loaded);
+    const byKeyword = await search.run({ query: "notebook" });
+    assert.ok(byKeyword.ok && byKeyword.output.includes("notebook_read("));
+    assert.ok(loaded.has("notebook_read"));
+
+    loaded.clear();
+    const selected = await search.run({ query: "select:git_log, git_blame,no_such_tool" });
+    assert.deepEqual([...loaded].sort(), ["git_blame", "git_log"]);
+    assert.match(selected.output, /Not found: no_such_tool/);
+    assert.ok(selected.output.includes(gitLogTool.description));
+  });
+
+  await test("a search that finds nothing lists what exists", async () => {
+    const search = createToolSearchTool(() => tools, new Set());
+    const result = await search.run({ query: "zzzqqq" });
+    assert.equal(result.ok, false);
+    assert.match(result.output, /delete_file/);
+  });
+
+  await test("a deferred tool runs once tool_search has loaded it", async () => {
+    const ran: string[] = [];
+    const { session, driver } = sessionReplies(
+      [
+        toolCallResponse("tool_search", { query: "select:echo_later" }),
+        toolCallResponse("echo_later", { text: "hi" }),
+        finalResponse("done"),
+      ],
+      [echo(ran)]
+    );
+    assert.equal(await session.runTask("go"), "done");
+    assert.deepEqual(ran, ["hi"]);
+    assert.ok(!driver.sentMessages[0].includes("UNIQUE-ECHO-DOC"), "its docs must stay out of the primer");
+    assert.ok(driver.sentMessages[1].includes("UNIQUE-ECHO-DOC"), "and arrive when searched for");
+  });
+
+  await test("calling an unloaded tool returns its definition and runs nothing", async () => {
+    const ran: string[] = [];
+    const { session, driver } = sessionReplies(
+      [
+        toolCallResponse("echo_later", { guess: "x" }),
+        toolCallResponse("echo_later", { text: "fixed" }),
+        finalResponse("done"),
+      ],
+      [echo(ran)]
+    );
+    await session.runTask("go");
+    assert.deepEqual(ran, ["fixed"], "the first call, on guessed args, must not run");
+    assert.match(driver.sentMessages[1], /did NOT run[\s\S]*UNIQUE-ECHO-DOC/);
+  });
+
+  console.log("Plan mode:");
+  await test("plan mode allow-lists tools, so a new tool is blocked by default", async () => {
+    const ran: string[] = [];
+    const { session, driver } = sessionReplies(
+      [toolCallResponse("tool_search", { query: "select:echo_later" }), toolCallResponse("echo_later", { text: "x" }), finalResponse("ok")],
+      [echo(ran)]
+    );
+    session.setPlanMode(true);
+    await session.runTask("look");
+    assert.deepEqual(ran, []);
+    assert.match(driver.sentMessages.join("\n"), /Plan mode is on, so echo_later did not run/);
+    assert.match(driver.sentMessages[0], /PLAN MODE IS ON/);
+  });
+
+  await test("nothing that changes anything is on the read-only list", () => {
+    for (const name of ["write_file", "edit_file", "multi_edit", "run_bash", "delete_file", "move_file", "copy_file",
+      "notebook_edit", "delegate_tasks", "browser_do", "remember", "kill_process"]) {
+      assert.ok(!READ_ONLY_TOOLS.has(name), name);
+    }
+  });
+
+  await test("a declined plan stays in plan mode, an approved one leaves it", async () => {
+    await withPrompts(async (answers) => {
+      const state = { active: true };
+      const exit = createPlanModeTools(state).find((t) => t.name === "exit_plan_mode")!;
+      answers.push("n");
+      assert.match((await exit.run({ plan: "Rewrite it" })).output, /did not approve/);
+      assert.equal(state.active, true);
+      answers.push("y");
+      await exit.run({ plan: "Rewrite it" });
+      assert.equal(state.active, false);
+    });
+  });
+
+  console.log("Claude Code tools:");
+  const scratchFile = (name: string) => path.join(".tmp-test", name);
+
+  await test("find_files matches filenames and paths", async () => {
+    assert.match((await findFilesTool.run({ pattern: "smoke.ts" })).output, /src\/tests\/smoke\.ts/);
+    assert.match((await findFilesTool.run({ pattern: "src/**/*Gem*.ts" })).output, /askGem\.ts/);
+    assert.match((await findFilesTool.run({ pattern: "*.nothing" })).output, /No files match/);
+  });
+
+  await test("read_files reads several, and refuses to leave the project", async () => {
+    await writeFile(scratchFile("a.txt"), "alpha");
+    const { output } = await readFilesTool.run({ paths: [scratchFile("a.txt"), "../outside.txt", scratchFile("gone.txt")] });
+    assert.match(output, /alpha/);
+    assert.match(output, /escapes the project root/);
+    assert.match(output, /Error reading it/);
+  });
+
+  await test("multi_edit is all or nothing", async () => {
+    const file = scratchFile("multi.txt");
+    await writeFile(file, "one\ntwo\n");
+    const failed = await multiEditTool.run({
+      path: file,
+      edits: [{ old_text: "one", new_text: "1" }, { old_text: "missing", new_text: "x" }],
+    });
+    assert.equal(failed.ok, false);
+    assert.match(failed.output, /Edit 2 of 2/);
+    assert.equal(await readFile(file, "utf8"), "one\ntwo\n");
+
+    const applied = await multiEditTool.run({
+      path: file,
+      edits: [{ old_text: "one", new_text: "1" }, { old_text: "1\ntwo", new_text: "1\n2" }],
+    });
+    assert.ok(applied.ok);
+    assert.equal(await readFile(file, "utf8"), "1\n2\n");
+  });
+
+  await test("move, copy and delete can all be undone", async () => {
+    const store = checkpoints;
+    const [a, b, c] = ["undo-a.txt", "undo-b.txt", "undo-c.txt"].map(scratchFile);
+    await writeFile(a, "A");
+    store.begin("files");
+    assert.ok((await copyFileTool.run({ from: a, to: c })).ok);
+    assert.ok((await moveFileTool.run({ from: a, to: b })).ok);
+    assert.ok((await deleteFileTool.run({ path: b })).ok);
+    await store.commit();
+    await store.undoLast();
+    assert.equal(await readFile(a, "utf8"), "A", "the original is back");
+    await assert.rejects(readFile(c, "utf8"), "the copy is gone");
+  });
+
+  await test("move and copy won't overwrite unless told to, or leave the project", async () => {
+    const [a, b] = ["keep-a.txt", "keep-b.txt"].map(scratchFile);
+    await writeFile(a, "A");
+    await writeFile(b, "B");
+    assert.match((await moveFileTool.run({ from: a, to: b })).output, /already exists/);
+    assert.equal(await readFile(b, "utf8"), "B");
+    assert.ok((await copyFileTool.run({ from: a, to: b, overwrite: true })).ok);
+    assert.equal(await readFile(b, "utf8"), "A");
+    assert.match((await moveFileTool.run({ from: a, to: "../stolen.txt" })).output, /escapes/);
+    assert.match((await deleteFileTool.run({ path: ".tmp-test" })).output, /isn't a file/);
+  });
+
+  await test("file_info reports size and lines, and says when nothing's there", async () => {
+    await writeFile(scratchFile("info.txt"), "a\nb\n");
+    assert.match((await fileInfoTool.run({ path: scratchFile("info.txt") })).output, /file, 4 bytes, 3 lines/);
+    assert.match((await fileInfoTool.run({ path: scratchFile("none.txt") })).output, /does not exist/);
+  });
+
+  await test("notebook cells can be read, replaced, inserted and deleted", async () => {
+    const file = scratchFile("n.ipynb");
+    const original = {
+      nbformat: 4,
+      nbformat_minor: 5,
+      metadata: {},
+      cells: [
+        { id: "a", cell_type: "markdown", metadata: {}, source: ["# Title\n"] },
+        { id: "b", cell_type: "code", metadata: {}, execution_count: 3, source: ["print(1)\n", "print(2)"],
+          outputs: [{ output_type: "stream", name: "stdout", text: ["1\n2\n"] }] },
+      ],
+    };
+    await writeFile(file, JSON.stringify(original));
+
+    const { output } = await notebookReadTool.run({ path: file });
+    assert.match(output, /cell 1 \(code\)[\s\S]*print\(2\)[\s\S]*--- output ---\n1\n2/);
+
+    assert.ok((await notebookEditTool.run({ path: file, cell: 1, source: "print(3)\nprint(4)" })).ok);
+    let saved = JSON.parse(await readFile(file, "utf8"));
+    assert.deepEqual(saved.cells[1].source, ["print(3)\n", "print(4)"]);
+    assert.deepEqual(saved.cells[1].outputs, [], "stale output must not outlive the code");
+    assert.equal(saved.cells[1].execution_count, null);
+
+    assert.ok((await notebookEditTool.run({ path: file, cell: 2, mode: "insert", source: "x", cell_type: "markdown" })).ok);
+    saved = JSON.parse(await readFile(file, "utf8"));
+    assert.equal(saved.cells[2].cell_type, "markdown");
+    assert.ok(saved.cells[2].id, "format 4.5 needs a cell id");
+
+    assert.ok((await notebookEditTool.run({ path: file, cell: 0, mode: "delete" })).ok);
+    assert.equal(JSON.parse(await readFile(file, "utf8")).cells.length, 2);
+    assert.match((await notebookEditTool.run({ path: file, cell: 9, source: "x" })).output, /between 0 and 1/);
+    assert.match((await notebookReadTool.run({ path: "package.json" })).output, /isn't a .ipynb/);
+  });
+
+  await test("outlines definitions across languages, and not control flow", () => {
+    const names = (src: string) => outline(src).map((d) => `${d.kind} ${d.name}`);
+    assert.deepEqual(names("export class Foo {\n  async bar(x: string): Promise<void> {\n    if (x) {\n    }\n  }\n}"), [
+      "class Foo",
+      "method bar",
+    ]);
+    assert.deepEqual(names("def run(a):\n    pass\nclass B:\n    def go(self):\n        pass"), ["def run", "class B", "def go"]);
+    assert.deepEqual(names("func (s *Server) Start() error {\n}\nfunc main() {\n}"), ["method Start", "func main"]);
+    assert.deepEqual(names("pub fn parse() {}\nstruct Token;"), ["fn parse", "struct Token"]);
+    assert.deepEqual(names("export const add = (a, b) => a + b;"), ["function add"]);
+  });
+
+  await test("code_outline and find_symbol work on this project", async () => {
+    assert.match((await codeOutlineTool.run({ path: "src/tools/toolSearch.ts" })).output, /function createToolSearchTool/);
+    const found = await findSymbolTool.run({ name: "createToolSearchTool", references: true, glob: "src/**/*.ts" });
+    assert.match(found.output, /src.tools.toolSearch\.ts:\d+: export function createToolSearchTool/);
+    assert.match(found.output, /Used at:[\s\S]*loop\.ts/);
+    assert.match((await findSymbolTool.run({ name: "a b(" })).output, /plain identifier/);
+  });
+
+  await test("search_code shows context and can list just the files", async () => {
+    const file = scratchFile("ctx.ts");
+    const hits = await searchCode({ pattern: "createToolSearchTool\\(", glob: "src/tools/toolSearch.ts", context: 1 });
+    assert.ok(hits.hits[0].before?.length && hits.hits[0].after?.length, file);
+    const { output } = await searchCodeTool.run({ pattern: "createToolSearchTool", glob: "src/**/*.ts", filesOnly: true });
+    assert.ok(!/:\d+:/.test(output), "no line numbers in a file list");
+    assert.match(output, /loop\.ts/);
+  });
+
+  await test("git history tools read this repository", async () => {
+    assert.match((await gitLogTool.run({ count: 2 })).output.split("\n")[0], /^[0-9a-f]{7,} \d{4}-\d\d-\d\d /);
+    assert.match((await gitShowTool.run({ ref: "HEAD", stat: true })).output, /commit [0-9a-f]+/);
+    assert.match((await gitBlameTool.run({ path: "package.json", start: 1, end: 2 })).output, /gemini-code|\{/);
+  });
+
+  await test("a git ref can't smuggle in an option, which could write files", async () => {
+    const trap = scratchFile("pwned.txt");
+    assert.equal((await gitShowTool.run({ ref: `--output=${trap}` })).ok, false);
+    assert.equal((await gitLogTool.run({ ref: `--output=${trap}` })).ok, false);
+    await assert.rejects(readFile(trap, "utf8"), "no file may have been written");
+  });
+
+  await test("wait_for_output waits for a line, and reports an exit without one", async () => {
+    const start = async (script: string) => {
+      const { output } = await bashTool.run({ command: `node -e "${script}"`, background: true });
+      return /"(bg_\w+)"/.exec(output)![1];
+    };
+    const ready = await start(`setTimeout(()=>{console.log('listening on 3000');setTimeout(()=>{},300)},300)`);
+    assert.match((await waitForOutputTool.run({ id: ready, pattern: "listening", timeout_seconds: 10 })).output, /Matched: listening on 3000/);
+
+    await new Promise((r) => setTimeout(r, 5));
+    const quiet = await start(`console.log('nope')`);
+    const missed = await waitForOutputTool.run({ id: quiet, pattern: "listening", timeout_seconds: 10 });
+    assert.equal(missed.ok, false);
+    assert.match(missed.output, /without a matching line/);
+    assert.match((await waitForOutputTool.run({ id: "bg_none" })).output, /No command/);
+  });
+
+  await test("ask_user asks in the terminal, and a number picks an option", async () => {
+    await withPrompts(async (answers) => {
+      answers.push("2");
+      assert.match((await askUserTool.run({ question: "Which?", options: ["red", "blue"] })).output, /answered: blue/);
+      answers.push("green");
+      assert.match((await askUserTool.run({ question: "Which?", options: ["red"] })).output, /answered: green/);
+    });
+  });
+
+  await test("ask_user still asks under auto-approve, and copes with nobody there", async () => {
+    setAsker(async () => "yes");
+    assert.match((await askUserTool.run({ question: "Sure?" })).output, /answered: yes/);
+    setAsker(undefined);
+    const alone = await askUserTool.run({ question: "Anyone?" });
+    assert.equal(alone.ok, false);
+    assert.match(alone.output, /Nobody is available/);
+  });
+
+  await test("skills are listed with descriptions and read by name", async () => {
+    const dir = path.resolve(".gemini-code", "skills", "smoke-skill");
+    await mkdir(dir, { recursive: true });
+    try {
+      await writeFile(path.join(dir, "SKILL.md"), "---\nname: smoke-skill\ndescription: Does a smoke test\n---\nStep one.");
+      assert.match((await useSkillTool.run({})).output, /- smoke-skill: Does a smoke test/);
+      assert.match((await useSkillTool.run({ name: "smoke-skill" })).output, /Step one\./);
+      assert.equal((await useSkillTool.run({ name: "../../package" })).ok, false);
+    } finally {
+      await rm(path.resolve(".gemini-code"), { recursive: true, force: true });
+    }
+  });
+
+  console.log("Desktop bridge:");
+  const bridgeFixture = (replies: GeminiResponse[]) => {
+    const events: BridgeEvent[] = [];
+    const calls: string[] = [];
+    const session = new AgentSession(new FakeDriver(replies));
+    const host: BridgeHost = {
+      runTask: (task, options) => session.runTask(task, options),
+      latestMarkdown: async () => "",
+      listModels: async () => {
+        calls.push("list");
+        return { models: [], thinking: [], current: "Gemini Auto" };
+      },
+      setModel: async (name) => {
+        calls.push(`model start ${name}`);
+        await new Promise((r) => setTimeout(r, 5));
+        calls.push(`model end ${name}`);
+      },
+      setThinkingLevel: async () => undefined,
+      newThread: async () => undefined,
+      setPlanMode: (on) => session.setPlanMode(on),
+      inPlanMode: () => session.inPlanMode,
+      listGems: async () => [],
+      setGem: async (name) => name,
+      markInterrupted: async () => undefined,
+      shutdown: async () => undefined,
+    };
+    const bridge = new Bridge(host, (e) => void events.push(e));
+    const send = (command: Record<string, unknown>) => bridge.handleLine(JSON.stringify(command));
+    const ofType = (type: string) => events.filter((e) => e.type === type);
+    const until = async (type: string) => {
+      while (!ofType(type).length) await new Promise((r) => setTimeout(r, 2));
+      return ofType(type)[0];
+    };
+    return { bridge, events, calls, send, ofType, until };
+  };
+  const withConfirmations = async (fn: () => Promise<void>) => {
+    delete process.env.GEMINI_CODE_AUTO_APPROVE;
+    try {
+      await fn();
+    } finally {
+      process.env.GEMINI_CODE_AUTO_APPROVE = "1";
+      setAsker(undefined);
+    }
+  };
+
+  await test("sorts the loop's log lines, worker tags included", () => {
+    assert.deepEqual(classifyActivity("⏺ read_file(a.ts)"), { kind: "tool", text: "read_file(a.ts)", worker: undefined });
+    assert.equal(classifyActivity("[api] ⏺ run_bash(ls)").worker, "api");
+    assert.equal(classifyActivity("[api]   ⎿ 3 lines (40 B)").kind, "detail");
+    assert.equal(classifyActivity("  ⎿ Exit code 1").failed, true);
+    assert.equal(classifyActivity("[api] opening tab…").kind, "note");
+  });
+
+  await test("reads the label and detail out of a confirmation question", () => {
+    const q = parseQuestion("\n[gemini-code] Run this command?\n  npm test\n  (y/N) ");
+    assert.deepEqual(q, { label: "Run this command?", detail: "npm test" });
+  });
+
+  await test("runs a task and reports tools, then the answer, then the end", async () => {
+    const { bridge, send, ofType } = bridgeFixture([
+      toolCallResponse("list_files", { path: "." }),
+      finalResponse("All done."),
+    ]);
+    await send({ id: 1, cmd: "task", text: "look around" });
+    await bridge.idle();
+    assert.deepEqual(ofType("reply")[0], { type: "reply", id: 1, ok: true, data: undefined });
+    assert.ok(ofType("activity").some((e) => e.kind === "tool" && String(e.text).startsWith("list_files")));
+    assert.equal(ofType("answer")[0].text, "All done.");
+    assert.equal(ofType("task_end")[0].status, "done");
+  });
+
+  await test("a plain question keeps its real answer, not just the nudge's reply", async () => {
+    process.env.GEMINI_CODE_IDLE_NUDGES = "1";
+    try {
+      const { bridge, send, ofType } = bridgeFixture([
+        finalResponse("Paris is the capital of France."),
+        finalResponse("That answer is complete."),
+      ]);
+      await send({ cmd: "task", text: "capital of France?" });
+      await bridge.idle();
+      const answers = ofType("answer");
+      assert.equal(answers[0].text, "Paris is the capital of France.");
+      assert.equal(answers[0].interim, true);
+      assert.equal(answers[1].text, "That answer is complete.");
+    } finally {
+      process.env.GEMINI_CODE_IDLE_NUDGES = "0";
+    }
+  });
+
+  await test("a confirmation waits for the UI, and only that request is answered", async () => {
+    await withConfirmations(async () => {
+      const target = path.join(".tmp-test", "bridge-approved.txt");
+      const { bridge, send, ofType, until } = bridgeFixture([
+        toolCallResponse("write_file", { path: target, content: "hi" }),
+        finalResponse("Wrote it."),
+      ]);
+      await send({ cmd: "task", text: "write it" });
+      const ask = await until("confirm");
+      assert.match(String(ask.label), /write/i);
+
+      await send({ id: 2, cmd: "confirm", confirm_id: Number(ask.id) + 1, approve: true });
+      assert.equal(ofType("reply").at(-1)?.ok, false, "a stale id must not approve anything");
+
+      await send({ id: 3, cmd: "confirm", confirm_id: ask.id, approve: true });
+      await bridge.idle();
+      assert.equal(await readFile(target, "utf8"), "hi");
+    });
+  });
+
+  await test("stop refuses the pending confirmation and ends at the next turn", async () => {
+    await withConfirmations(async () => {
+      const target = path.join(".tmp-test", "bridge-stopped.txt");
+      const { bridge, send, ofType, until } = bridgeFixture([
+        toolCallResponse("write_file", { path: target, content: "no" }),
+        finalResponse("should never be read"),
+      ]);
+      await send({ cmd: "task", text: "write it" });
+      await until("confirm");
+      await send({ cmd: "stop" });
+      await bridge.idle();
+      assert.equal(ofType("task_end")[0].status, "stopped");
+      assert.equal(ofType("confirm_closed").length, 1);
+      await assert.rejects(readFile(target, "utf8"), "the refused write must not have happened");
+    });
+  });
+
+  await test("refuses commands that would disturb a running task", async () => {
+    await withConfirmations(async () => {
+      const { bridge, send, ofType, until } = bridgeFixture([
+        toolCallResponse("write_file", { path: path.join(".tmp-test", "bridge-busy.txt"), content: "x" }),
+        finalResponse("Done."),
+      ]);
+      await send({ cmd: "task", text: "write it" });
+      const ask = await until("confirm");
+      await send({ id: 9, cmd: "new_chat" });
+      assert.match(String(ofType("reply").at(-1)?.error), /while a task is running/);
+      await send({ cmd: "confirm", confirm_id: ask.id, approve: false });
+      await bridge.idle();
+    });
+  });
+
+  await test("commands that use the tab's menus run one at a time", async () => {
+    const { calls, send } = bridgeFixture([]);
+    await Promise.all([send({ cmd: "model", text: "Auto" }), send({ cmd: "model", text: "Pro" })]);
+    assert.deepEqual(calls, ["model start Auto", "model end Auto", "list", "model start Pro", "model end Pro", "list"]);
+    setAsker(undefined);
+  });
+
+  await test("a question waits for the user, and stale answers are refused", async () => {
+    const { bridge, send, ofType, until } = bridgeFixture([
+      toolCallResponse("tool_search", { query: "select:ask_user" }),
+      toolCallResponse("ask_user", { question: "Which database?", options: ["Postgres", "SQLite"] }),
+      finalResponse("Going with SQLite."),
+    ]);
+    await send({ cmd: "task", text: "set up storage" });
+    const asked = await until("question");
+    assert.deepEqual(asked.options, ["Postgres", "SQLite"]);
+    await send({ id: 2, cmd: "answer", question_id: Number(asked.id) + 1, text: "SQLite" });
+    assert.equal(ofType("reply").at(-1)?.ok, false);
+    await send({ cmd: "answer", question_id: asked.id, text: "SQLite" });
+    await bridge.idle();
+    assert.equal(ofType("question_closed")[0].answer, "SQLite");
+    assert.equal(ofType("answer")[0].text, "Going with SQLite.");
+    setAsker(undefined);
+    setQuestioner(undefined);
+  });
+
+  await test("stop closes a pending question", async () => {
+    const { bridge, send, ofType, until } = bridgeFixture([
+      toolCallResponse("tool_search", { query: "select:ask_user" }),
+      toolCallResponse("ask_user", { question: "Which?" }),
+      finalResponse("never read"),
+    ]);
+    await send({ cmd: "task", text: "go" });
+    await until("question");
+    await send({ cmd: "stop" });
+    await bridge.idle();
+    assert.equal(ofType("task_end")[0].status, "stopped");
+    setAsker(undefined);
+    setQuestioner(undefined);
+  });
+
+  await test("task_end reports plan mode, which the model can end itself", async () => {
+    const { bridge, send, ofType } = bridgeFixture([
+      toolCallResponse("tool_search", { query: "select:exit_plan_mode" }),
+      toolCallResponse("exit_plan_mode", { plan: "Do it." }),
+      finalResponse("Done."),
+    ]);
+    await send({ id: 1, cmd: "plan_mode", on: true });
+    await send({ cmd: "task", text: "plan it" });
+    await bridge.idle();
+    assert.equal(ofType("task_end")[0].planMode, false);
+    setAsker(undefined);
+    setQuestioner(undefined);
+  });
+
+  await test("bad input gets an error reply rather than killing the bridge", async () => {
+    const { bridge, send, ofType } = bridgeFixture([]);
+    await bridge.handleLine("not json");
+    await send({ id: 1, cmd: "nonsense" });
+    assert.equal(ofType("reply").length, 2);
+    assert.ok(ofType("reply").every((r) => r.ok === false));
+    setAsker(undefined);
   });
 
   console.log("Context (tree + memory):");

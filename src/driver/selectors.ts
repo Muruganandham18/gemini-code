@@ -106,4 +106,13 @@ export const selectors = {
 
   /** Items inside the opened model picker menu. */
   modeMenuItem: '[role="menuitem"]',
+
+  /** The picker entry that opens the Thinking level submenu, on hover. */
+  thinkingLevelMenu: 'gem-menu-item[value="thinking_level"]',
+
+  /** Low / Medium / High in that submenu. They carry no id of their own. */
+  thinkingLevelItem: 'gem-menu-item:not([data-test-id^="bard-mode-option"]):not([value="thinking_level"])',
+
+  /** What a model above the account's plan opens instead of switching. */
+  upgradeDialog: '[role="dialog"]:has-text("Upgrade"), mat-dialog-container:has-text("Upgrade")',
 } as const;
