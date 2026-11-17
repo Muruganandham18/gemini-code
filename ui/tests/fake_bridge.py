@@ -36,6 +36,10 @@ thinking = [
 ]
 reads = 0
 installed_skills = []
+mcp_servers = [
+    {"name": "files", "source": "project", "state": "connected", "tools": ["mcp__files__read", "mcp__files__write"]},
+    {"name": "broken", "source": "project", "state": "failed", "tools": [], "error": "command not found <b>"},
+]
 
 
 def menu():
@@ -112,6 +116,7 @@ def main():
          mode="orchestrator", workers=3, tools=["read_file"],
          context={"treeLines": 12, "memory": "GEMINI.md", "docs": ["README.md"]},
          createdMemory=True, resumablePlan="interrupted")
+    emit(type="mcp", servers=mcp_servers)
 
     waiting = None
     for line in sys.stdin:
@@ -135,6 +140,8 @@ def main():
             finish(answer=f"Using {command['text']}.")
         elif cmd == "plan_mode":
             data = {"on": command["on"]}
+        elif cmd == "mcp":
+            data = {"servers": mcp_servers}
         elif cmd == "skills":
             data = {"installed": installed_skills, "others": [{"name": "synced", "description": "From Claude", "source": "claude"}]}
         elif cmd == "skill_find":

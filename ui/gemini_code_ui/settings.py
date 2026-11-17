@@ -85,6 +85,7 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("upload_timeout", "Wait for an upload (ms)", TIMEOUTS, "int", 120_000, "GEMINI_CODE_UPLOAD_TIMEOUT_MS", minimum=1000),
     Setting("shell_timeout", "Wait for Gemini to load (ms)", TIMEOUTS, "int", 60_000, "GEMINI_CODE_SHELL_TIMEOUT_MS", minimum=1000),
     Setting("bash_timeout", "Foreground command timeout (ms)", TIMEOUTS, "int", 60_000, "GEMINI_CODE_BASH_TIMEOUT_MS", minimum=1000),
+    Setting("mcp_timeout", "MCP tool call timeout (ms)", TIMEOUTS, "int", 60_000, "GEMINI_CODE_MCP_TIMEOUT_MS", minimum=1000),
 
     Setting("profile", "Chrome profile folder", BROWSER, "path", "", "GEMINI_CODE_PROFILE",
             help="Holds a live Google session. Empty uses ~/.gemini-code/profile. Never share or commit it."),

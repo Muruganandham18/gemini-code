@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 from . import theme
 from .agent import AgentProcess, ApiServerProcess, node_command, process_environment
 from .chat import ChatPage
-from .pages import ApiPage, LogsPage, MemoryPage, PlanPage, SettingsPage, SkillsPage
+from .pages import ApiPage, LogsPage, McpPage, MemoryPage, PlanPage, SettingsPage, SkillsPage
 from .picker import ModelPopup, picker_label
 from .settings import Settings
 
@@ -98,6 +98,7 @@ class MainWindow(QMainWindow):
         self.memory_page = MemoryPage()
         self.skills_page = SkillsPage()
         self.settings_page = SettingsPage(self.settings)
+        self.mcp_page = McpPage()
         self.api_page = ApiPage(self.settings)
         self.logs_page = LogsPage()
 
@@ -108,6 +109,7 @@ class MainWindow(QMainWindow):
             ("Memory", self.memory_page),
             ("Skills", self.skills_page),
             ("Settings", self.settings_page),
+            ("MCP servers", self.mcp_page),
             ("API server", self.api_page),
             ("Logs", self.logs_page),
         ]
@@ -156,6 +158,7 @@ class MainWindow(QMainWindow):
         self.skills_page.install.connect(self.install_skills)
         self.skills_page.remove.connect(self.remove_skill)
         self.settings_page.applied.connect(self.apply_settings)
+        self.mcp_page.saved.connect(self.apply_settings)
         self.api_page.toggled.connect(self.toggle_api)
 
     def _build_sidebar(self) -> QWidget:
@@ -246,6 +249,9 @@ class MainWindow(QMainWindow):
             self.settings_page.form.reload()
         elif page is self.skills_page:
             self.refresh_skills()
+        elif page is self.mcp_page:
+            self.mcp_page.load(self.settings["project"])
+            self.agent.command("mcp", self._on_mcp_reply)
 
     # --- state ----------------------------------------------------------
     def _set_state(self, state: str) -> None:
@@ -420,6 +426,20 @@ class MainWindow(QMainWindow):
         if event.get("resumablePlan"):
             self.chat.view.add_note("An unfinished plan was found. Your next task will continue it.", "warn")
         self.log(f"tools: {', '.join(event.get('tools') or [])}")
+
+    def _on_mcp(self, event: dict) -> None:
+        servers = event.get("servers") or []
+        self.mcp_page.show_servers(servers)
+        for server in servers:
+            count = len(server.get("tools") or [])
+            if server.get("state") == "connected":
+                self.chat.view.add_note(f"MCP server {server['name']} connected: {count} tool{'' if count == 1 else 's'}.")
+            elif server.get("state") == "failed":
+                self.chat.view.add_note(f"MCP server {server['name']} failed: {server.get('error')}", "bad")
+
+    def _on_mcp_reply(self, reply: dict) -> None:
+        if reply.get("ok"):
+            self.mcp_page.show_servers(reply["data"]["servers"])
 
     def _on_fatal(self, event: dict) -> None:
         message = str(event.get("message", "")).strip()

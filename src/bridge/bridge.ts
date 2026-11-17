@@ -6,6 +6,7 @@ import { readClipboardImageDetailed } from "../context/clipboard.js";
 import type { ModelMenu } from "../driver/models.js";
 import { discoverSkills, installSkills, listInstalled, removeSkill } from "../tools/skillInstall.js";
 import { findSkills } from "../tools/skills.js";
+import type { McpServerStatus } from "../tools/mcp.js";
 import { setAsker, setQuestioner } from "../ui/prompt.js";
 
 /**
@@ -44,6 +45,9 @@ export interface BridgeHost {
   setPlanMode(on: boolean): void;
   /** The model can change it too, so the UI asks rather than assuming. */
   inPlanMode(): boolean;
+  /** Connects MCP servers, asking the user about any that need approval. */
+  connectMcp(): Promise<void>;
+  mcpStatus(): McpServerStatus[];
   listGems(): Promise<{ id: string; name: string }[]>;
   /** Points the session at a Gem, or none. Returns the name now in use. */
   setGem(name: string | null): Promise<string | null>;
@@ -63,6 +67,7 @@ const DURING_TASK = new Set([
   "plan",
   "memory",
   "remember",
+  "mcp",
   "skills",
   "skill_find",
   "skill_install",
@@ -137,6 +142,17 @@ export class Bridge {
   /** Resolves once the running task, if any, has ended. */
   idle(): Promise<void> {
     return this.task;
+  }
+
+  /**
+   * Runs after `ready`, because approving a server needs the UI listening. In
+   * the queue, so a task sent meanwhile waits and gets the servers' tools.
+   */
+  connectMcp(): Promise<void> {
+    return this.onTab(async () => {
+      await this.host.connectMcp();
+      this.emit({ type: "mcp", servers: this.host.mcpStatus() });
+    });
   }
 
   private onTab<T>(work: () => Promise<T>): Promise<T> {
@@ -245,6 +261,9 @@ export class Bridge {
 
       case "plan":
         return { plan: (await readPlan())?.raw ?? null };
+
+      case "mcp":
+        return { servers: this.host.mcpStatus() };
 
       // These come from the app's Skills page. The agent has no way to send
       // them, because a skill is instructions it would go on to follow.

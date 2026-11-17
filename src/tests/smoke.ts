@@ -8,7 +8,7 @@
  * selector calibration (see README.md).
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseGeminiReply, looksLikeAbandonedWork, looksUnfinished } from "../agent/toolCallParser.js";
@@ -33,6 +33,7 @@ import { findSkills, parseFrontmatter, renderSkill, useSkillTool } from "../tool
 import { discoverSkills, installSkills, listInstalled, parseSkillSource, removeSkill } from "../tools/skillInstall.js";
 import { askUserTool } from "../tools/askUser.js";
 import { checkpoints } from "../context/checkpoint.js";
+import { expandEnv, loadMcpConfig, McpManager } from "../tools/mcp.js";
 import { describeEnvironment, onPath, type EnvironmentInfo } from "../context/environment.js";
 import { bashTool, checkOutputTool, killProcessTool, looksLongRunning, resolveShell, waitForOutputTool } from "../tools/bash.js";
 import { fetchUrlTool } from "../tools/fetchUrl.js";
@@ -2113,6 +2114,172 @@ async function main() {
     }
   });
 
+  console.log("MCP:");
+  const fixture = path.resolve("src", "tests", "fixtures", "mcp-server.mjs");
+  /** A throwaway project and home folder, so real approvals are never touched. */
+  const mcpFolders = async (servers: Record<string, unknown>, file = ".mcp.json") => {
+    const base = path.resolve(".tmp-test", `mcp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`);
+    const root = path.join(base, "project");
+    const home = path.join(base, "home");
+    await mkdir(root, { recursive: true });
+    await mkdir(home, { recursive: true });
+    await writeFile(path.join(file === ".mcp.json" ? root : home, file), JSON.stringify({ mcpServers: servers }));
+    return { root, home };
+  };
+  const stdioServer = { command: process.execPath, args: [fixture] };
+
+  await test("a project's server doesn't start until the user approves it", async () => {
+    await withPrompts(async (answers) => {
+      const { root, home } = await mcpFolders({ demo: stdioServer });
+      const declined = new McpManager(root, home);
+      answers.push("n");
+      await declined.connectAll();
+      assert.equal(declined.status[0].state, "declined");
+      assert.equal(declined.tools.length, 0);
+
+      const approved = new McpManager(root, home);
+      answers.push("y");
+      await approved.connectAll();
+      assert.equal(approved.status[0].state, "connected");
+      await approved.close();
+    });
+  });
+
+  await test("auto-approve doesn't start a project's server", async () => {
+    const { root, home } = await mcpFolders({ demo: stdioServer });
+    let asked = 0;
+    setAsker(async () => {
+      asked++;
+      return "n";
+    });
+    process.env.GEMINI_CODE_AUTO_APPROVE = "1";
+    const manager = new McpManager(root, home);
+    await manager.connectAll();
+    setAsker(undefined);
+    assert.equal(asked, 1, "the question must still be asked");
+    assert.equal(manager.status[0].state, "declined");
+  });
+
+  await test("approval is remembered, until the command changes", async () => {
+    await withPrompts(async (answers) => {
+      const { root, home } = await mcpFolders({ demo: stdioServer });
+      answers.push("y");
+      const first = new McpManager(root, home);
+      await first.connectAll();
+      await first.close();
+
+      const again = new McpManager(root, home);
+      await again.connectAll();
+      assert.equal(again.status[0].state, "connected", "no second question");
+      await again.close();
+
+      await writeFile(path.join(root, ".mcp.json"), JSON.stringify({ mcpServers: { demo: { ...stdioServer, args: [fixture, "--changed"] } } }));
+      answers.push("n");
+      const changed = new McpManager(root, home);
+      await changed.connectAll();
+      assert.equal(changed.status[0].state, "declined", "a changed command needs approving again");
+    });
+  });
+
+  await test("a personal server starts without asking", async () => {
+    const { root, home } = await mcpFolders({ mine: stdioServer }, "mcp.json");
+    const manager = new McpManager(root, home);
+    await manager.connectAll();
+    assert.equal(manager.status[0].source, "personal");
+    assert.equal(manager.status[0].state, "connected");
+    await manager.close();
+  });
+
+  await test("server tools are deferred, confirmed, and report errors and images", async () => {
+    const { root, home } = await mcpFolders({ "my server": stdioServer }, "mcp.json");
+    const manager = new McpManager(root, home);
+    await manager.connectAll();
+    const tool = (name: string) => manager.tools.find((t) => t.name === name)!;
+    assert.deepEqual(manager.status[0].tools, [
+      "mcp__my_server__add",
+      "mcp__my_server__secret_env",
+      "mcp__my_server__fail",
+      "mcp__my_server__picture",
+    ]);
+    assert.ok(manager.tools.every((t) => t.deferred));
+    assert.match(tool("mcp__my_server__add").description, /Adds two numbers[\s\S]*my server/);
+
+    assert.deepEqual(await tool("mcp__my_server__add").run({ a: 2, b: 3 }), { ok: true, output: "5" });
+    const failed = await tool("mcp__my_server__fail").run({});
+    assert.equal(failed.ok, false);
+    assert.equal(failed.output, "it broke");
+    const picture = await tool("mcp__my_server__picture").run({});
+    assert.ok(picture.attachment && (await readFile(picture.attachment)).length > 0);
+
+    await withPrompts(async (answers) => {
+      answers.push("n");
+      assert.match((await tool("mcp__my_server__add").run({ a: 1, b: 1 })).output, /declined/);
+    });
+    await manager.close();
+  });
+
+  await test("a stdio server gets only what its config names, not our secrets", async () => {
+    process.env.GEMINI_CODE_SMOKE_SECRET = "leaked";
+    const { root, home } = await mcpFolders({ s: { ...stdioServer, env: { GIVEN: "${GEMINI_CODE_SMOKE_SECRET}" } } }, "mcp.json");
+    const manager = new McpManager(root, home);
+    await manager.connectAll();
+    const env = manager.tools.find((t) => t.name.endsWith("secret_env"))!;
+    assert.equal((await env.run({ name: "GEMINI_CODE_SMOKE_SECRET" })).output, "(unset)");
+    assert.equal((await env.run({ name: "GIVEN" })).output, "leaked", "${VAR} expands when the config asks for it");
+    await manager.close();
+    delete process.env.GEMINI_CODE_SMOKE_SECRET;
+  });
+
+  await test("connects to a server over HTTP", async () => {
+    const child = spawn(process.execPath, [fixture, "--http"], { stdio: ["ignore", "pipe", "inherit"] });
+    try {
+      const url = await new Promise<string>((resolve) => child.stdout.once("data", (d) => resolve(String(d).trim())));
+      const { root, home } = await mcpFolders({ remote: { url } }, "mcp.json");
+      const manager = new McpManager(root, home);
+      await manager.connectAll();
+      assert.equal(manager.status[0].state, "connected", manager.status[0].error);
+      assert.equal((await manager.tools[0].run({ a: 4, b: 5 })).output, "9");
+      await manager.close();
+    } finally {
+      child.kill();
+    }
+  });
+
+  await test("a server that won't start is reported, and the rest still connect", async () => {
+    const { root, home } = await mcpFolders(
+      { broken: { command: "this-command-does-not-exist-anywhere" }, good: stdioServer, empty: {} },
+      "mcp.json"
+    );
+    const manager = new McpManager(root, home);
+    await manager.connectAll();
+    const state = Object.fromEntries(manager.status.map((s) => [s.name, s.state]));
+    assert.deepEqual(state, { broken: "failed", good: "connected", empty: "failed" });
+    assert.ok(manager.status.find((s) => s.name === "broken")?.error);
+    await manager.close();
+  });
+
+  await test("a broken config file is a warning, not a crash", async () => {
+    const { root, home } = await mcpFolders({});
+    await writeFile(path.join(root, ".mcp.json"), "{not json");
+    const warnings: string[] = [];
+    assert.deepEqual(loadMcpConfig(root, home, (m) => warnings.push(m)), []);
+    assert.match(warnings[0], /Ignoring/);
+  });
+
+  await test("a project's server replaces a personal one of the same name", async () => {
+    const { root, home } = await mcpFolders({ same: { command: "personal" } }, "mcp.json");
+    await writeFile(path.join(root, ".mcp.json"), JSON.stringify({ mcpServers: { same: { command: "project" } } }));
+    assert.deepEqual(loadMcpConfig(root, home).map((e) => [e.source, e.config.command]), [["project", "project"]]);
+  });
+
+  await test("expands variables and defaults", () => {
+    assert.equal(expandEnv("${A}-${B:-fallback}-${C}", { A: "1" }), "1-fallback-");
+  });
+
+  await test("plan mode blocks MCP tools, whatever a server says about them", () => {
+    assert.ok(![...READ_ONLY_TOOLS].some((name) => name.startsWith("mcp__")));
+  });
+
   console.log("Environment:");
   const machine = (platform: NodeJS.Platform, shell: string, have: string[]): EnvironmentInfo => ({
     platform,
@@ -2370,6 +2537,8 @@ async function main() {
       newThread: async () => undefined,
       setPlanMode: (on) => session.setPlanMode(on),
       inPlanMode: () => session.inPlanMode,
+      connectMcp: async () => undefined,
+      mcpStatus: () => [],
       listGems: async () => [],
       setGem: async (name) => name,
       markInterrupted: async () => undefined,

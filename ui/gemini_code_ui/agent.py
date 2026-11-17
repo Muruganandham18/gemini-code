@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -32,6 +33,10 @@ def node_command(*args: str) -> list[str]:
 
 def process_environment(env: dict[str, str | None]) -> QProcessEnvironment:
     out = QProcessEnvironment.systemEnvironment()
+    if BUNDLE:
+        # So an MCP server or a command that runs `node` finds the bundled one
+        # on a machine that has no Node of its own.
+        out.insert("PATH", os.pathsep.join([str(BUNDLE), out.value("PATH")]))
     for name, value in env.items():
         if value is None:
             out.remove(name)

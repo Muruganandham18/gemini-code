@@ -16,8 +16,13 @@ let queue: Promise<unknown> = Promise.resolve();
  * Read at call time, not module load, so tests/scripts can toggle it
  * per-invocation instead of only via the process's startup environment.
  */
-export async function confirmAction(promptLabel: string, detail: string): Promise<boolean> {
-  if (process.env.GEMINI_CODE_AUTO_APPROVE === "1") return true;
+export async function confirmAction(
+  promptLabel: string,
+  detail: string,
+  /** `always` is for trust decisions, which auto-approve must not make for the user. */
+  opts: { always?: boolean } = {}
+): Promise<boolean> {
+  if (process.env.GEMINI_CODE_AUTO_APPROVE === "1" && !opts.always) return true;
 
   const run = queue.then(() => ask(promptLabel, detail));
   // Keep the chain alive even if one prompt rejects.
