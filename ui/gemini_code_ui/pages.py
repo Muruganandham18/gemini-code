@@ -528,7 +528,7 @@ class McpPage(QWidget):
     def load(self, project: str) -> None:
         self.project = project
         file = self._file()
-        self.editor.setPlainText(file.read_text(encoding="utf-8") if file and file.exists() else "")
+        self.editor.setPlainText(file.read_text(encoding="utf-8-sig") if file and file.exists() else "")
         self.message.setText("")
 
     def show_servers(self, servers: list[dict]) -> None:

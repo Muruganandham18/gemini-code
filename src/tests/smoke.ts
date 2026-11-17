@@ -2266,6 +2266,14 @@ async function main() {
     assert.match(warnings[0], /Ignoring/);
   });
 
+  await test("a config saved with a BOM, as Windows PowerShell writes it, still loads", async () => {
+    const { root, home } = await mcpFolders({});
+    await writeFile(path.join(root, ".mcp.json"), "﻿" + JSON.stringify({ mcpServers: { bom: { command: "x" } } }));
+    const warnings: string[] = [];
+    assert.deepEqual(loadMcpConfig(root, home, (m) => warnings.push(m)).map((e) => e.name), ["bom"]);
+    assert.deepEqual(warnings, []);
+  });
+
   await test("a project's server replaces a personal one of the same name", async () => {
     const { root, home } = await mcpFolders({ same: { command: "personal" } }, "mcp.json");
     await writeFile(path.join(root, ".mcp.json"), JSON.stringify({ mcpServers: { same: { command: "project" } } }));

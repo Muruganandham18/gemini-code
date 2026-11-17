@@ -66,7 +66,10 @@ function expandConfig(config: McpServerConfig): McpServerConfig {
 function readServers(file: string, warn: (msg: string) => void): Record<string, McpServerConfig> {
   if (!existsSync(file)) return {};
   try {
-    const parsed = JSON.parse(readFileSync(file, "utf8")) as { mcpServers?: Record<string, McpServerConfig> };
+    // Without the BOM that Windows PowerShell and some editors put at the start,
+    // which JSON.parse rejects, so the whole file was quietly ignored.
+    const text = readFileSync(file, "utf8").replace(/^﻿/, "");
+    const parsed = JSON.parse(text) as { mcpServers?: Record<string, McpServerConfig> };
     return parsed.mcpServers ?? {};
   } catch (err) {
     warn(`Ignoring ${file}: ${(err as Error).message}`);

@@ -118,7 +118,9 @@ class Settings:
     @classmethod
     def load(cls, path: Path = SETTINGS_FILE) -> "Settings":
         try:
-            return cls(json.loads(path.read_text(encoding="utf-8")), path)
+            # utf-8-sig: Windows tools save with a BOM, and plain utf-8 reads
+            # that as a stray character that json rejects, losing every setting.
+            return cls(json.loads(path.read_text(encoding="utf-8-sig")), path)
         except (OSError, ValueError):
             return cls(path=path)
 
