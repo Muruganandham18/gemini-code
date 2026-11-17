@@ -18,6 +18,8 @@ export interface MainSessionOptions {
   modelAlias: () => string;
   /** ask_gem, when a Gem is in use as reference. */
   gemTool?: ToolDefinition;
+  /** Read per session, since servers connect after the first one is made. */
+  mcpTools?: () => ToolDefinition[];
   orchestrator: boolean;
   log: (msg: string) => void;
 }
@@ -57,6 +59,7 @@ export function createMainSession(opts: MainSessionOptions): AgentSession {
           // tool): they need the project's conventions more than the
           // planning tab does.
           ...(gemTool ? [gemTool] : []),
+          ...(opts.mcpTools?.() ?? []),
         ],
         undefined,
         "worker"
@@ -71,6 +74,7 @@ export function createMainSession(opts: MainSessionOptions): AgentSession {
       createUpdatePlanTool(journal),
       ...browsingTools(driver),
       ...(gemTool ? [gemTool] : []),
+      ...(opts.mcpTools?.() ?? []),
     ],
     journal,
     opts.orchestrator ? "orchestrator" : "solo"

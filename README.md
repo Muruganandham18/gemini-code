@@ -238,6 +238,7 @@ Semantic versioning, reported by `gemini-code --version`.
 
 | Version | Highlights |
 | --- | --- |
+| **0.11.0** | MCP servers over stdio, HTTP and SSE, loaded on demand, with project servers approved before they start |
 | **0.10.0** | portable Mac app; a folder picker on each chat; Gemini told which OS, shell and tools it's working with; model picker fixed after Gemini's November 2026 menu change, and locked models recognised by their padlock |
 | **0.9.0** | Claude-compatible skills, installed from GitHub with `gemini-code skills add` or the app's Skills page |
 | **0.8.2** | desktop app and standalone Windows exe, on-demand tool loading with `tool_search`, 40 tools including plan mode, `ask_user`, notebooks, skills and git history, model picker read live from Gemini |
@@ -325,6 +326,7 @@ Typing **while a task runs** steers it — your text is folded into the next tur
 | `GEMINI_CODE_REMINDER_TURNS` | `5` | how often the tool-call contract is restated |
 | `GEMINI_CODE_DRIFT_NUDGES` | `2` | nudges when a reply abandons the protocol |
 | `GEMINI_CODE_BASH_TIMEOUT_MS` | `60000` | foreground command timeout |
+| `GEMINI_CODE_MCP_TIMEOUT_MS` | `60000` | how long one MCP tool call may take |
 | `GEMINI_CODE_SHELL` | Git Bash on Windows, else `sh` | shell commands run in (e.g. `powershell.exe`) |
 | `GEMINI_CODE_CLAUDE_SKILLS` | `1` | `0` = don't use skills from `~/.claude/skills` |
 
@@ -444,6 +446,7 @@ you to sign in by hand; the app carries on by itself once you have.
 | **Plan** | `GEMINI-PLAN.md`, the journal of the current task |
 | **Memory** | `GEMINI.md`, the durable project memory |
 | **Skills** | Your skills, and installing more from GitHub |
+| **MCP servers** | How each server is doing, and an editor for the project's `.mcp.json` |
 | **Settings** | Every `GEMINI_CODE_*` variable in [Environment](#environment), with the same defaults. Model and thinking live in the composer's picker instead |
 | **API server** | Start and stop `gemini-code serve`, with its address, port, tabs, key and CORS origins |
 | **Logs** | Everything the agent reported |
@@ -517,7 +520,38 @@ until someone decides it's safe. Gemini can enter it with `enter_plan_mode`, or 
 with the **Plan mode** button in the app. It ends when you approve a plan through
 `exit_plan_mode`.
 
-Not here: MCP servers, git worktrees, and scheduled or cloud agents.
+Not here: git worktrees, and scheduled or cloud agents.
+
+## MCP servers
+
+Tools from other programs arrive as `mcp__<server>__<tool>`, loaded on demand like the
+rest, so a server with fifty tools costs fifty names rather than fifty schemas. List them
+in `.mcp.json` in the project, in the same format as Claude Code, or in
+`~/.gemini-code/mcp.json` for every project. The desktop app's **MCP servers** page shows
+how each is doing and edits the project's file.
+
+```json
+{
+  "mcpServers": {
+    "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] },
+    "tracker": { "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer ${TRACKER_TOKEN}" } }
+  }
+}
+```
+
+A project's config can name any command, so opening a repository never runs one:
+
+- Each server in a project's `.mcp.json` needs your approval before it starts, **even with
+  auto-approve on**. It's remembered until its config changes.
+- Each tool call asks first, like any other side effect.
+- Plan mode blocks all MCP tools, whatever a server says about them.
+- A server gets a minimal environment, not your shell's secrets. `${VAR}` in the config
+  passes one on deliberately.
+
+Servers run over stdio, Streamable HTTP, or SSE (`"type": "sse"`). OAuth sign-in isn't
+supported, so an HTTP server needs a token in `headers`. In the exe and Mac app, a server
+started with `node` uses the bundled Node, so it works without Node installed; one started
+with `npx` or `python` still needs that installed. `/mcp` lists servers in the terminal.
 
 ## Skills
 

@@ -1,7 +1,9 @@
 """Everything beside the chat: settings, API server, plan, memory and logs."""
 from __future__ import annotations
 
+import json
 from html import escape
+from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication
@@ -466,6 +468,105 @@ class SkillsPage(QWidget):
             remove.clicked.connect(lambda: self.remove.emit(skill["name"]))
             row.addWidget(remove, 0, Qt.AlignmentFlag.AlignTop)
         self._installed.addLayout(row)
+
+
+MCP_STATES = {
+    "connected": ("Connected", theme.GOOD),
+    "failed": ("Failed", theme.BAD),
+    "declined": ("Not approved", theme.WARN),
+    "disconnected": ("Disconnected", theme.BAD),
+}
+
+
+class McpPage(QWidget):
+    """The project's MCP servers: how each one is doing, and the file that lists them."""
+
+    saved = Signal()
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.project = ""
+        layout = page_layout(self, "MCP servers")
+        intro = QLabel(
+            "Tools from other programs. Gemini loads them on demand like any other tool, and each call asks first. "
+            "Servers in a project's .mcp.json need your approval before they start. Yours for every project go in "
+            "~/.gemini-code/mcp.json."
+        )
+        intro.setObjectName("muted")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.status = QLabel("No servers yet.")
+        self.status.setObjectName("muted")
+        self.status.setTextFormat(Qt.TextFormat.RichText)
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+
+        self.editor = QPlainTextEdit()
+        self.editor.setObjectName("log")
+        self.editor.setAccessibleName(".mcp.json")
+        self.editor.setPlaceholderText(
+            '{\n  "mcpServers": {\n    "files": {\n      "command": "npx",\n'
+            '      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]\n    }\n  }\n}'
+        )
+        layout.addWidget(self.editor, 1)
+
+        self.message = QLabel("")
+        self.message.setObjectName("noteBad")
+        self.message.setWordWrap(True)
+        self.save = QPushButton("Save and restart agent")
+        self.save.setObjectName("primary")
+        self.save.clicked.connect(self._save)
+        row = QHBoxLayout()
+        row.addWidget(self.message, 1)
+        row.addWidget(self.save)
+        layout.addLayout(row)
+
+    def _file(self) -> Path | None:
+        return Path(self.project) / ".mcp.json" if self.project else None
+
+    def load(self, project: str) -> None:
+        self.project = project
+        file = self._file()
+        self.editor.setPlainText(file.read_text(encoding="utf-8") if file and file.exists() else "")
+        self.message.setText("")
+
+    def show_servers(self, servers: list[dict]) -> None:
+        if not servers:
+            self.status.setText("No servers yet.")
+            return
+        lines = []
+        for server in servers:
+            label, colour = MCP_STATES.get(server.get("state"), ("Unknown", theme.MUTED))
+            count = len(server.get("tools") or [])
+            # A server's own error text, so it's escaped like anything else it says.
+            error = f" — {escape(str(server['error']))}" if server.get("error") else ""
+            lines.append(
+                f'<span style="color:{colour}">●</span> <b>{escape(server.get("name", ""))}</b> '
+                f"{label}, {count} tool{'' if count == 1 else 's'}{error}"
+            )
+        self.status.setText("<br>".join(lines))
+
+    def _save(self) -> None:
+        file = self._file()
+        if not file:
+            self.message.setText("Choose a project folder first.")
+            return
+        text = self.editor.toPlainText().strip()
+        try:
+            servers = json.loads(text or "{}").get("mcpServers", {})
+            if not isinstance(servers, dict):
+                raise ValueError('"mcpServers" must be an object')
+        except (ValueError, AttributeError) as err:
+            self.message.setText(f"That isn't valid: {err}")
+            return
+        # Empty means no servers: don't leave an empty file in the project.
+        if text:
+            file.write_text(text + "\n", encoding="utf-8")
+        elif file.exists():
+            file.unlink()
+        self.message.setText("")
+        self.saved.emit()
 
 
 class LogsPage(QWidget):

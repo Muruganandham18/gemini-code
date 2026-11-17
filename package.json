@@ -1,6 +1,6 @@
 {
   "name": "gemini-code",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Claude-Code-style coding agent that drives the Gemini web UI via Playwright (for orgs with a Gemini Pro web plan but no API/CLI access).",
   "type": "module",
   "scripts": {
@@ -16,6 +16,7 @@
     "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "playwright": "^1.47.0"
   },
   "devDependencies": {

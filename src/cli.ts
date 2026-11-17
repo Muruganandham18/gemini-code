@@ -18,6 +18,7 @@ import {
 } from "./driver/models.js";
 import { tools } from "./tools/index.js";
 import { killAllBackgroundProcesses } from "./tools/bash.js";
+import { McpManager, MCP_CONFIG_FILENAME } from "./tools/mcp.js";
 import { discoverSkills, installSkills, listInstalled, removeSkill } from "./tools/skillInstall.js";
 import { findSkills, skillSummaries } from "./tools/skills.js";
 import { MAX_PARALLEL_WORKERS } from "./agent/workers.js";
@@ -36,7 +37,7 @@ import { existsSync } from "node:fs";
 const ORCHESTRATOR_MODE = process.env.GEMINI_CODE_ORCHESTRATOR !== "0";
 
 /** Kept in step with package.json by `npm version`. */
-export const VERSION = "0.10.0";
+export const VERSION = "0.11.0";
 import { openChrome, ensureChromeRunning } from "./scripts/openChrome.js";
 import { checkLogin } from "./scripts/login.js";
 import { c } from "./ui/format.js";
@@ -63,6 +64,7 @@ ${modelHelp()
   ${c.cyan("/memory")}           show ${MEMORY_FILENAME}
   ${c.cyan("/remember <note>")}  append a note to ${MEMORY_FILENAME}
   ${c.cyan("/tools")}            list tools available to Gemini
+  ${c.cyan("/mcp")}              show MCP servers
   ${c.cyan("/help")}             this message
   ${c.cyan("/exit")}             quit (or Ctrl+C)
 
@@ -163,6 +165,7 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
 `);
 
   const journal = new PlanJournal();
+  const mcp = new McpManager();
   let skills = await skillSummaries();
   const makeMainSession = (mem: string | undefined, resumePlan?: string) =>
     createMainSession({
@@ -171,6 +174,7 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
       journal,
       modelAlias: () => startModel,
       gemTool: gemConsultant?.tool,
+      mcpTools: () => mcp.tools,
       orchestrator: ORCHESTRATOR_MODE,
       log: (msg) => console.log(msg),
     });
@@ -191,6 +195,7 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
   const onSignal = async () => {
     await journal.markInterrupted("session terminated");
     await gemConsultant?.close();
+    await mcp.close();
     // Don't leave a dev server holding its port after we're gone.
     killAllBackgroundProcesses();
     process.exit(130);
@@ -306,6 +311,12 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
       pending = resolve;
     });
   };
+
+  // Here rather than with the rest of startup, because a project's servers
+  // need approving, and that needs the prompt wired up. Nothing has been sent
+  // yet, so the session can be remade with their tools.
+  await mcp.connectAll((msg) => console.log(c.dim(msg)));
+  if (mcp.tools.length) session = makeMainSession(memory, resumable?.raw);
 
   try {
     while (true) {
@@ -501,6 +512,13 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
               console.log(`  ${c.green("✓")} saved to ${MEMORY_FILENAME}\n`);
               break;
 
+            case "mcp":
+              if (!mcp.status.length) console.log(`  ${c.dim(`no MCP servers — add them to ${MCP_CONFIG_FILENAME}`)}\n`);
+              for (const s of mcp.status) {
+                console.log(`  ${c.cyan(s.name)} ${s.state}, ${s.tools.length} tool(s)${s.error ? ` — ${s.error}` : ""}`);
+              }
+              break;
+
             case "tools":
               console.log("");
               for (const t of tools) console.log(`  ${c.cyan(t.name)}\n    ${c.dim(t.description)}`);
@@ -551,6 +569,7 @@ ${c.dim("Type a task, or /help for commands. Ctrl+V pastes an image; typing whil
     setAsker(undefined);
     // Close the Gem's tab with the session that opened it.
     await gemConsultant?.close();
+    await mcp.close();
     rl.close();
     killAllBackgroundProcesses();
     await driver.close();

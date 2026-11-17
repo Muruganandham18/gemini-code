@@ -14,6 +14,7 @@ import type { ModelMenu } from "../driver/models.js";
 import { ensureChromeRunning } from "../scripts/openChrome.js";
 import { createAskGemTool } from "../tools/askGem.js";
 import { killAllBackgroundProcesses } from "../tools/bash.js";
+import { McpManager } from "../tools/mcp.js";
 import { skillSummaries } from "../tools/skills.js";
 import type { ToolDefinition } from "../types.js";
 import { setAsker, setQuestioner } from "../ui/prompt.js";
@@ -60,6 +61,7 @@ export async function runBridge(): Promise<void> {
     stopSession = session.stop;
     bridge = new Bridge(session.host, emit);
     emit({ type: "ready", ...session.info });
+    await bridge.connectMcp();
   } catch (err) {
     emit({ type: "fatal", message: (err as Error).message });
     await exit(1);
@@ -129,6 +131,7 @@ async function startSession(emit: Emit, exit: () => Promise<void>) {
   });
 
   const journal = new PlanJournal();
+  const mcp = new McpManager();
   const makeSession = (memory: string | undefined, resumePlan?: string) =>
     createMainSession({
       driver,
@@ -136,6 +139,7 @@ async function startSession(emit: Emit, exit: () => Promise<void>) {
       journal,
       modelAlias: () => modelName,
       gemTool: gemConsultant?.tool,
+      mcpTools: () => mcp.tools,
       orchestrator,
       log,
     });
@@ -164,6 +168,16 @@ async function startSession(emit: Emit, exit: () => Promise<void>) {
     newThread: freshThread,
     setPlanMode: (on) => session.setPlanMode(on),
     inPlanMode: () => session.inPlanMode,
+    async connectMcp() {
+      await mcp.connectAll(log);
+      if (!mcp.tools.length) return;
+      // Nothing has been sent yet, so the session can simply be made again
+      // with the servers' tools, keeping the plan the first one was resuming.
+      const planning = session.inPlanMode;
+      session = makeSession(memory, resumable?.raw);
+      session.setPlanMode(planning);
+    },
+    mcpStatus: () => mcp.status,
     listGems: () => driver.listGems(),
     async setGem(name) {
       if (!name) {
@@ -195,6 +209,7 @@ async function startSession(emit: Emit, exit: () => Promise<void>) {
     setQuestioner(undefined);
     await journal.markInterrupted("session terminated");
     await gemConsultant?.close();
+    await mcp.close();
     // Don't leave a dev server holding its port after we're gone.
     killAllBackgroundProcesses();
     await driver.close();

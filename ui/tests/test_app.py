@@ -451,6 +451,45 @@ def the_folder_can_be_chosen_on_first_run_but_not_mid_task():
 
 
 @test
+def mcp_results_reach_the_chat_and_the_page():
+    window = make_window()
+    wait_for(lambda: "MCP server files connected: 2 tools." in transcript(window))
+    assert "MCP server broken failed" in transcript(window)
+    window.nav.setCurrentRow(window.pages.indexOf(window.mcp_page))
+    wait_for(lambda: "Connected, 2 tools" in window.mcp_page.status.text())
+    assert "&lt;b&gt;" in window.mcp_page.status.text(), "a server's error text must not be treated as markup"
+    shot(window, "mcp")
+    close(window)
+
+
+@test
+def the_mcp_page_saves_valid_config_and_refuses_the_rest():
+    window = make_window()
+    config = Path(window.settings["project"]) / ".mcp.json"
+    config.unlink(missing_ok=True)
+    window.nav.setCurrentRow(window.pages.indexOf(window.mcp_page))
+    page = window.mcp_page
+
+    page.editor.setPlainText("{not json")
+    page.save.click()
+    assert "isn't valid" in page.message.text() and not config.exists()
+
+    page.editor.setPlainText('{"mcpServers": {"a": {"command": "node"}}}')
+    page.save.click()
+    assert json.loads(config.read_text(encoding="utf-8"))["mcpServers"]["a"]["command"] == "node"
+    wait_for(lambda: window.pages.currentWidget() is window.chat)
+    wait_for(lambda: window.state == "ready")
+
+    window.nav.setCurrentRow(window.pages.indexOf(window.mcp_page))
+    assert "node" in page.editor.toPlainText(), "it reads back what's on disk"
+    page.editor.setPlainText("")
+    page.save.click()
+    assert not config.exists()
+    wait_for(lambda: window.state == "ready")
+    close(window)
+
+
+@test
 def stop_closes_the_pending_approval():
     window = make_window()
     send(window, "write a file")
