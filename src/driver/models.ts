@@ -80,6 +80,8 @@ export interface MenuRow {
   text: string;
   testId: string;
   selected: boolean;
+  /** Shows a padlock. */
+  locked?: boolean;
 }
 
 export interface MenuEntry {
@@ -93,7 +95,8 @@ export interface MenuEntry {
 export interface LiveModel extends MenuEntry {
   /**
    * Above the account's plan. Selecting it opens an upgrade dialog rather than
-   * switching, so nothing should click it. Google marks these in the row's id.
+   * switching, so nothing should click it. Google has marked these with
+   * "upsell" in the row's id, and later with only a padlock icon.
    */
   locked: boolean;
 }
@@ -115,15 +118,20 @@ function menuEntry(row: MenuRow): MenuEntry {
 export function parseModelRows(rows: MenuRow[]): LiveModel[] {
   return rows
     .filter((row) => row.text && !EXTENDED_THINKING.matches(row.text))
-    .map((row) => ({ ...menuEntry(row), locked: /upsell/i.test(row.testId) }));
+    .map((row) => ({ ...menuEntry(row), locked: Boolean(row.locked) || /upsell/i.test(row.testId) }));
 }
 
 export function parseThinkingRows(rows: MenuRow[]): MenuEntry[] {
   return rows.filter((row) => row.text).map(menuEntry);
 }
 
-/** Does a picker row answer to this name: its own, or a friendly alias? */
+/**
+ * Does a picker row answer to this name: either of its lines, or a friendly
+ * alias? Either line, because rows have been "3.1 Pro / Advanced reasoning" and
+ * then "Code & analysis / 4 Argon", with the model's name on whichever.
+ */
 export function menuRowMatches(wanted: string, rowText: string): boolean {
-  const name = rowText.split("\n")[0].trim().toLowerCase();
-  return name === wanted.trim().toLowerCase() || (resolveModel(wanted)?.matches(rowText) ?? false);
+  const needle = wanted.trim().toLowerCase();
+  const lines = rowText.split("\n").map((line) => line.trim().toLowerCase());
+  return lines.includes(needle) || (resolveModel(wanted)?.matches(rowText) ?? false);
 }

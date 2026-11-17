@@ -20,10 +20,12 @@ BAD = "#ec8a7f"
 
 UI_FONT = "Segoe UI"
 MONO_FONT = "Cascadia Mono"
-MONO_STACK = f'"{MONO_FONT}", Consolas, monospace'
+# Each system's own font, so the Mac app doesn't fall back to a generic one.
+UI_STACK = f'"{UI_FONT}", "SF Pro Text", "Helvetica Neue", sans-serif'
+MONO_STACK = f'"{MONO_FONT}", Consolas, Menlo, monospace'
 
 STYLE = f"""
-* {{ font-family: "{UI_FONT}"; font-size: 10pt; color: {TEXT}; }}
+* {{ font-family: {UI_STACK}; font-size: 10pt; color: {TEXT}; }}
 QMainWindow, QDialog, QWidget#page {{ background: {BG}; }}
 QWidget#sidebar {{ background: {SIDEBAR}; border-right: 1px solid {SURFACE}; }}
 QLabel {{ background: transparent; }}

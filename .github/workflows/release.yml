@@ -1,8 +1,8 @@
-# Pushing a tag like v0.8.2 tests it, builds both downloads and publishes a release.
+# Pushing a tag like v0.10.0 tests it, builds every download and publishes a release.
 # Changing this pipeline does a dry run on the branch: everything but publishing.
 #
 # The tarball isn't optional: install.sh and install.ps1 look for a .tar.gz on the
-# latest release, so a release with only the exe would break them.
+# latest release, so a release without one would break them.
 name: Release
 
 on:
@@ -13,6 +13,7 @@ on:
     paths:
       - .github/workflows/release.yml
       - ui/build_exe.ps1
+      - ui/build_mac.sh
       - scripts/package-release.sh
 
 jobs:
@@ -57,8 +58,32 @@ jobs:
           if-no-files-found: error
           include-hidden-files: true
 
+  # Apple Silicon. Intel Macs can use the tarball and install.sh.
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm ci
+      - run: npm test
+      - run: pip install -r ui/requirements-build.txt
+      - run: python ui/tests/test_app.py
+      - run: PYTHON=python bash ui/build_mac.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: .release/mac/*.zip
+          if-no-files-found: error
+          include-hidden-files: true
+
   publish:
-    needs: [tarball, exe]
+    needs: [tarball, exe, mac]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
@@ -67,6 +92,6 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
-      - run: gh release create "$GITHUB_REF_NAME" gemini-code.exe *.tar.gz --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+      - run: gh release create "$GITHUB_REF_NAME" gemini-code.exe gemini-code-macos-*.zip *.tar.gz --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}

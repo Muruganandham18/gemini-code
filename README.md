@@ -238,6 +238,7 @@ Semantic versioning, reported by `gemini-code --version`.
 
 | Version | Highlights |
 | --- | --- |
+| **0.10.0** | portable Mac app; model picker fixed after Gemini's November 2026 menu change, and locked models recognised by their padlock |
 | **0.9.0** | Claude-compatible skills, installed from GitHub with `gemini-code skills add` or the app's Skills page |
 | **0.8.2** | desktop app and standalone Windows exe, on-demand tool loading with `tool_search`, 40 tools including plan mode, `ask_user`, notebooks, skills and git history, model picker read live from Gemini |
 | **0.4.1** | Windows: commands run in the same console with output captured, Git Bash preferred over cmd, process trees killed properly |
@@ -411,11 +412,17 @@ putting it behind a public service.
 
 A native app (PySide6, no web server) with the chat and every setting in one window.
 
-**On Windows, [download `gemini-code.exe`](https://github.com/Muruganandham18/gemini-code/releases/latest)
-and run it.** It's one file with Node.js and the agent inside, so Google Chrome is all you
-need installed. It unpacks itself to a temp folder when it starts, so the first launch
-takes a few seconds. The exe isn't code-signed, so Windows SmartScreen may warn you the
-first time: choose **More info**, then **Run anyway**.
+Download it from the [latest release](https://github.com/Muruganandham18/gemini-code/releases/latest).
+Node.js and the agent are inside, so Google Chrome is all you need installed.
+
+- **Windows:** `gemini-code.exe`. It's one file that unpacks itself to a temp folder when
+  it starts. It isn't code-signed, so SmartScreen may warn you the first time: choose
+  **More info**, then **Run anyway**.
+- **Mac (Apple Silicon):** `gemini-code-macos-arm64.zip`. Unzip it and move
+  `gemini-code.app` to Applications. It isn't signed by Apple, so the first time macOS says
+  it can't be opened: open **System Settings → Privacy & Security** and choose **Open
+  Anyway**, or run `xattr -dr com.apple.quarantine /Applications/gemini-code.app`. Intel
+  Macs can use the [terminal install](#install) instead.
 
 To run it from a checkout instead, which needs Node.js and Python 3.10+:
 
@@ -425,7 +432,8 @@ powershell -ExecutionPolicy Bypass -File ui\setup.ps1
 
 Then double-click `ui\gemini-code-ui.bat`. On macOS or Linux, `npm install && npm run
 build`, make a venv, `pip install -r ui/requirements.txt`, and from `ui/` run
-`python -m gemini_code_ui`. `ui\build_exe.ps1` builds the exe yourself.
+`python -m gemini_code_ui`. `ui\build_exe.ps1` builds the exe yourself, and `ui/build_mac.sh`
+the Mac app.
 
 Choose a project folder and the agent starts there. The first time, Chrome opens for
 you to sign in by hand; the app carries on by itself once you have.

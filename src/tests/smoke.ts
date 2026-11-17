@@ -46,6 +46,7 @@ import {
   type MenuRow,
 } from "../driver/models.js";
 import { resolveGem } from "../driver/GeminiDriver.js";
+import { selectors } from "../driver/selectors.js";
 import { createAskGemTool } from "../tools/askGem.js";
 import { gemFlag, gemModeFlag, serveArgs } from "../args.js";
 import { startServer } from "../server/openai.js";
@@ -1375,6 +1376,31 @@ async function main() {
       { name: "3.1 Pro", description: "Advanced reasoning", selected: false, locked: true },
       { name: "4 Argon", description: "Complex tasks", selected: false, locked: true },
     ]);
+  });
+
+  // The same menu two weeks later: radio items, and a padlock instead of an id.
+  const liveMenuNov17: MenuRow[] = [
+    { text: "Auto\nAdapts to your needs", testId: "bard-mode-option-cf41b0e0dd7d53e5", selected: true },
+    { text: "Code & analysis\n4 Argon", testId: "bard-mode-option-argon", selected: false, locked: true },
+    { text: "Thinking level", testId: "", selected: false },
+  ];
+
+  await test("a padlock marks a locked model when its id no longer does", () => {
+    assert.deepEqual(parseModelRows(liveMenuNov17), [
+      { name: "Auto", description: "Adapts to your needs", selected: true, locked: false },
+      { name: "Code & analysis", description: "4 Argon", selected: false, locked: true },
+    ]);
+  });
+
+  await test("a row answers to the name on either of its lines", () => {
+    assert.ok(menuRowMatches("4 Argon", "Code & analysis\n4 Argon"));
+    assert.ok(menuRowMatches("code & analysis", "Code & analysis\n4 Argon"));
+    assert.ok(!menuRowMatches("Argon", "Code & analysis\n4 Argon"), "a part of a name isn't a match");
+  });
+
+  await test("the picker selector matches radio items, which is what models are now", () => {
+    const matches = (role: string) => new RegExp(`^${selectors.modeMenuItem.match(/\^="(\w+)"/)![1]}`).test(role);
+    for (const role of ["menuitem", "menuitemradio", "menuitemcheckbox"]) assert.ok(matches(role), role);
   });
 
   await test("reads thinking levels from the submenu", () => {
