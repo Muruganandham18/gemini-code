@@ -33,6 +33,7 @@ import { findSkills, parseFrontmatter, renderSkill, useSkillTool } from "../tool
 import { discoverSkills, installSkills, listInstalled, parseSkillSource, removeSkill } from "../tools/skillInstall.js";
 import { askUserTool } from "../tools/askUser.js";
 import { checkpoints } from "../context/checkpoint.js";
+import { describeEnvironment, onPath, type EnvironmentInfo } from "../context/environment.js";
 import { bashTool, checkOutputTool, killProcessTool, looksLongRunning, resolveShell, waitForOutputTool } from "../tools/bash.js";
 import { fetchUrlTool } from "../tools/fetchUrl.js";
 import { webSearchTool, parseResults } from "../tools/webSearch.js";
@@ -2110,6 +2111,54 @@ async function main() {
     } finally {
       await rm(path.resolve(".gemini-code"), { recursive: true, force: true });
     }
+  });
+
+  console.log("Environment:");
+  const machine = (platform: NodeJS.Platform, shell: string, have: string[]): EnvironmentInfo => ({
+    platform,
+    release: "1.0",
+    arch: "x64",
+    shell,
+    commands: Object.fromEntries(["python3", "python", "node", "git", "brew"].map((c) => [c, have.includes(c)])),
+  });
+
+  await test("Windows with Git Bash: bash syntax, Windows paths", () => {
+    const text = describeEnvironment(machine("win32", "bash.exe", ["python", "node", "git"]));
+    assert.match(text, /^ENVIRONMENT: Windows 1\.0 \(x64\)/);
+    assert.match(text, /Git Bash, so write bash/);
+    assert.match(text, /C:\/Users/);
+    assert.match(text, /Python is `python`/);
+    assert.match(describeEnvironment(machine("win32", "bash.exe", ["python3", "python"])), /Python is `python`/,
+      "on Windows, python is preferred when both work");
+  });
+
+  await test("Windows with cmd or PowerShell gets their own syntax, not bash's", () => {
+    assert.match(describeEnvironment(machine("win32", "cmd.exe", [])), /write cmd: dir, del[\s\S]*no ls, rm, grep/);
+    assert.match(describeEnvironment(machine("win32", "powershell.exe", [])), /write PowerShell[\s\S]*no `&&`/);
+  });
+
+  await test("macOS is told about BSD tools, Linux about GNU ones", () => {
+    const mac = describeEnvironment(machine("darwin", "sh", ["python3", "git", "brew"]));
+    assert.match(mac, /^ENVIRONMENT: macOS/);
+    assert.match(mac, /sed -i ''/);
+    assert.match(mac, /Python is `python3`; install packages with `python3 -m pip`/);
+    assert.match(mac, /Not installed: node/);
+    assert.match(describeEnvironment(machine("linux", "sh", ["python3"])), /GNU tools/);
+  });
+
+  await test("the primer carries the real machine's environment", () => {
+    const primer = buildSystemPrimer([]);
+    const expected = { win32: "Windows", darwin: "macOS", linux: "Linux" }[process.platform as string] ?? process.platform;
+    assert.match(primer, new RegExp(`ENVIRONMENT: ${expected} `));
+    assert.match(buildSystemPrimer([], "worker"), /ENVIRONMENT:/, "workers run commands too");
+  });
+
+  await test("PATH lookup finds a command by its Windows extension, and not a missing one", async () => {
+    const dir = path.resolve(".tmp-test", "path-lookup");
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "tool.CMD"), "");
+    assert.equal(onPath("tool", { PATH: dir, PATHEXT: ".EXE;.CMD" }, "win32"), true);
+    assert.equal(onPath("absent", { PATH: dir, PATHEXT: ".EXE;.CMD" }, "win32"), false);
   });
 
   console.log("Skills:");

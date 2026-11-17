@@ -49,6 +49,8 @@ SETTINGS: tuple[Setting, ...] = (
     # account. Empty leaves Gemini on whatever it has selected.
     Setting("model", "Model", PICKER, "text", "", "GEMINI_CODE_MODEL"),
     Setting("thinking_level", "Thinking level", PICKER, "text", "", "GEMINI_CODE_THINKING"),
+    # Most recent first, for the composer's folder picker.
+    Setting("recent_projects", "Recent folders", PICKER, "list", ()),
     Setting("gem", "Gem", GENERAL, "text", "", "GEMINI_CODE_GEM",
             help="Name or id of a Gem to use. Leave empty for none."),
     Setting("gem_mode", "Gem mode", GENERAL, "choice", "reference", "GEMINI_CODE_GEM_MODE",

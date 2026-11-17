@@ -238,7 +238,7 @@ Semantic versioning, reported by `gemini-code --version`.
 
 | Version | Highlights |
 | --- | --- |
-| **0.10.0** | portable Mac app; model picker fixed after Gemini's November 2026 menu change, and locked models recognised by their padlock |
+| **0.10.0** | portable Mac app; a folder picker on each chat; Gemini told which OS, shell and tools it's working with; model picker fixed after Gemini's November 2026 menu change, and locked models recognised by their padlock |
 | **0.9.0** | Claude-compatible skills, installed from GitHub with `gemini-code skills add` or the app's Skills page |
 | **0.8.2** | desktop app and standalone Windows exe, on-demand tool loading with `tool_search`, 40 tools including plan mode, `ask_user`, notebooks, skills and git history, model picker read live from Gemini |
 | **0.4.1** | Windows: commands run in the same console with output captured, Git Bash preferred over cmd, process trees killed properly |
@@ -472,6 +472,12 @@ python ui/tests/real_bridge.py     # the real agent over its pipes
 ```
 
 ## Tools
+
+Gemini is told which system it's working on: Windows, macOS or Linux, which shell its
+commands run in (Git Bash, cmd or PowerShell on Windows), whether the tools are BSD or GNU,
+and which of `python`/`python3`, `node` and `git` are actually installed. Windows Python is
+found by running it, since a Store install is invisible to a file check and Windows ships a
+fake `python.exe` that only opens the Store.
 
 Gemini sees a small core set in full. The rest are named and nothing more, and it loads
 what it needs with `tool_search`, so the first message stays small and context goes on

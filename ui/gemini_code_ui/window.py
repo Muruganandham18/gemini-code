@@ -1,6 +1,7 @@
 """The main window: wires the agent's events to the pages."""
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -46,6 +47,7 @@ HELP = """Commands:
 MAX_NUDGE_ACK_CHARS = 200
 
 THINKING_WORDS = {"on": "High", "off": "Low"}
+MAX_RECENT_FOLDERS = 8
 LOGO = Path(__file__).resolve().parent / "assets" / "logo.png"
 
 STATE_LABELS = {
@@ -141,6 +143,11 @@ class MainWindow(QMainWindow):
         composer.gem_button.setMenu(self.gem_menu)
         self.gem_menu.aboutToShow.connect(self._fill_gem_menu)
 
+        self.folder_menu = QMenu(self)
+        self.folder_menu.setToolTipsVisible(True)
+        composer.folder_button.setMenu(self.folder_menu)
+        self.folder_menu.aboutToShow.connect(self._fill_folder_menu)
+
         self.plan_page.refresh.connect(self.refresh_plan)
         self.plan_page.clear.connect(self.clear_plan)
         self.memory_page.refresh.connect(self.refresh_memory)
@@ -213,6 +220,8 @@ class MainWindow(QMainWindow):
     def _load_controls(self) -> None:
         project = self.settings["project"]
         self.project_button.setText(Path(project).name if project else "Choose a folder…")
+        self.chat.composer.folder_button.setText(f"{Path(project).name if project else 'Choose a folder'}  ▾")
+        self.chat.composer.folder_button.setToolTip(project or "Choose the folder this chat works in")
         self._show_gem()
         self._show_menu()
 
@@ -304,10 +313,46 @@ class MainWindow(QMainWindow):
         if folder:
             self.set_project(folder)
 
+    def recent_folders(self) -> list[str]:
+        """Recent folders that still exist, the current one included and first."""
+        current = self.settings["project"]
+        folders = ([current] if current else []) + list(self.settings["recent_projects"] or [])
+        seen: set[str] = set()
+        recent = []
+        for folder in folders:
+            key = os.path.normcase(os.path.normpath(folder))
+            if key not in seen and Path(folder).is_dir():
+                seen.add(key)
+                recent.append(folder)
+        return recent[:MAX_RECENT_FOLDERS]
+
+    def _fill_folder_menu(self) -> None:
+        menu = self.folder_menu
+        menu.clear()
+        folders = self.recent_folders()
+        names = [Path(folder).name for folder in folders]
+        current = self.settings["project"]
+        for folder, name in zip(folders, names):
+            # Two folders of the same name are told apart by where they are.
+            label = f"{name} ({Path(folder).parent.name})" if names.count(name) > 1 else name
+            mark = "✓  " if folder == current else "     "
+            action = menu.addAction(mark + label)
+            action.setToolTip(folder)
+            action.triggered.connect(lambda _=False, chosen=folder: self.set_project(chosen))
+        if folders:
+            menu.addSeparator()
+        menu.addAction("Choose another folder…").triggered.connect(self.choose_project)
+
     def set_project(self, folder: str) -> None:
-        if self.state == "busy" and not self._ask("Stop the running task and switch folders?"):
+        """A chat works in one folder, so another folder means a new chat there."""
+        if os.path.normcase(os.path.normpath(folder)) == os.path.normcase(os.path.normpath(self.settings["project"] or "")):
             return
+        if self.state == "busy" and not self._ask("Stop the running task and start a new chat in another folder?"):
+            return
+        # Read before switching, or the folder being left drops out of the list.
+        self.settings["recent_projects"] = self.recent_folders()
         self.settings["project"] = folder
+        self.settings["recent_projects"] = self.recent_folders()
         self.settings.save()
         self.settings_page.form.reload()
         self._load_controls()
