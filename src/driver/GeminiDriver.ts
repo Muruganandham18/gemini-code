@@ -475,14 +475,17 @@ export class GeminiDriver implements IGeminiDriver {
   private readMenuRows(selector: string): Promise<MenuRow[]> {
     return this.requirePage()
       .locator(selector)
-      .evaluateAll((elements) =>
-        elements
-          .filter((el) => el.getBoundingClientRect().width > 0)
-          .map((el) => ({
-            text: (el as HTMLElement).innerText.trim(),
-            testId: el.getAttribute("data-test-id") ?? "",
-            selected: el.classList.contains("selected"),
-          }))
+      .evaluateAll(
+        (elements, lockIcon) =>
+          elements
+            .filter((el) => el.getBoundingClientRect().width > 0)
+            .map((el) => ({
+              text: (el as HTMLElement).innerText.trim(),
+              testId: el.getAttribute("data-test-id") ?? "",
+              selected: el.classList.contains("selected") || el.getAttribute("aria-checked") === "true",
+              locked: el.querySelector(lockIcon) !== null,
+            })),
+        selectors.lockIcon
       );
   }
 
@@ -556,7 +559,10 @@ export class GeminiDriver implements IGeminiDriver {
         if (!menuRowMatches(wanted, text)) continue;
 
         const name = text.split("\n")[0].trim();
-        if (/upsell/i.test((await item.getAttribute("data-test-id")) ?? "")) {
+        const locked =
+          /upsell/i.test((await item.getAttribute("data-test-id")) ?? "") ||
+          (await item.locator(selectors.lockIcon).count()) > 0;
+        if (locked) {
           await this.closeModePicker();
           throw new Error(`"${name}" isn't included in your Gemini plan.`);
         }

@@ -21,7 +21,8 @@ Reply = Callable[[dict], None]
 
 def node_command(*args: str) -> list[str]:
     """The agent's command line, or a clear error when it can't run yet."""
-    node = str(BUNDLE / "node.exe") if BUNDLE else shutil.which("node")
+    bundled = BUNDLE / ("node.exe" if sys.platform == "win32" else "node") if BUNDLE else None
+    node = str(bundled) if bundled else shutil.which("node")
     if not node:
         raise RuntimeError("Node.js wasn't found on PATH. Install Node 20 or newer.")
     if not CLI.exists():

@@ -27,6 +27,9 @@ cp package.json README.md LICENSE "${STAGE}/"
 # to run, and roughly halves the download.
 echo "Installing production dependencies..."
 (cd "${STAGE}" && npm install --omit=dev --silent --no-audit --no-fund >/dev/null)
+# Symlinks to command-line tools nothing here runs, and Windows' tar can't
+# create them, so the installer printed errors on every install there.
+rm -rf "${STAGE}/node_modules/.bin"
 
 cat > "${STAGE}/gemini-code" <<'LAUNCHER'
 #!/usr/bin/env bash
