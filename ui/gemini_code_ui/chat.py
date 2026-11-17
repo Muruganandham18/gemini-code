@@ -529,6 +529,10 @@ class Composer(QFrame):
 
         self.attach = self._round_button("+", "icon", "Attach an image. You can also paste one or drop it here.")
         self.attach.clicked.connect(self._choose_images)
+        self.folder_button = QPushButton()
+        self.folder_button.setObjectName("pill")
+        self.folder_button.setToolTip("The folder this chat works in")
+        self.folder_button.setAccessibleName("Project folder")
         self.plan_button = QPushButton("Plan mode")
         self.plan_button.setObjectName("pill")
         self.plan_button.setCheckable(True)
@@ -552,6 +556,7 @@ class Composer(QFrame):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
         row.addWidget(self.attach)
+        row.addWidget(self.folder_button)
         row.addWidget(self.plan_button)
         row.addStretch()
         row.addWidget(self.gem_button)
@@ -587,6 +592,8 @@ class Composer(QFrame):
         self.model_button.setEnabled(mode == "idle")
         self.gem_button.setEnabled(mode == "idle")
         self.plan_button.setEnabled(mode == "idle")
+        # Open before the agent has started too: choosing a folder is how it starts.
+        self.folder_button.setEnabled(mode != "busy")
         self.stop_button.setVisible(mode == "busy")
         self.send_button.setToolTip("Steer the running task" if mode == "busy" else "Send")
         self.edit.setPlaceholderText(

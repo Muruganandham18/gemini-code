@@ -30,7 +30,7 @@ export function resolveShell(): string | true {
 }
 
 const SHELL = resolveShell();
-const SHELL_NAME =
+export const SHELL_NAME =
   SHELL === true ? (IS_WINDOWS ? "cmd.exe" : "sh") : (SHELL.split(/[\\/]/).pop() ?? SHELL);
 
 /**

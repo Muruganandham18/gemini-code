@@ -23,6 +23,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 
 from gemini_code_ui import chat
+from gemini_code_ui import window as window_module
 from gemini_code_ui.chat import ConfirmCard, CodeBlock, MarkdownView, split_markdown
 from gemini_code_ui.settings import SETTINGS, Settings
 from gemini_code_ui.theme import apply_theme
@@ -357,6 +358,95 @@ def a_skill_can_be_removed_after_asking():
         wait_for(lambda: "<b>temp</b>" not in page_text(page))
     finally:
         QMessageBox.question = original
+    close(window)
+
+
+def folders(*names):
+    paths = []
+    for name in names:
+        path = scratch / "folders" / name
+        path.mkdir(parents=True, exist_ok=True)
+        paths.append(str(path))
+    return paths
+
+
+def menu_labels(window):
+    window._fill_folder_menu()
+    return [action.text().strip() for action in window.folder_menu.actions() if action.text()]
+
+
+@test
+def the_folder_picker_lists_recent_folders_with_the_current_one_ticked():
+    window = make_window()
+    alpha, beta = folders("alpha", "beta")
+    window.settings["recent_projects"] = [alpha, beta, str(scratch / "deleted-long-ago")]
+    labels = menu_labels(window)
+    assert labels[0].startswith("✓") and labels[0].endswith("project"), labels
+    assert labels[1:] == ["alpha", "beta", "Choose another folder…"], "missing folders are left out"
+    assert window.chat.composer.folder_button.text().startswith("project")
+    close(window)
+
+
+@test
+def choosing_another_folder_starts_a_new_chat_there_and_remembers_it():
+    window = make_window()
+    (alpha,) = folders("alpha")
+    send(window, "look around")
+    wait_for(lambda: window.state == "ready" and "a.py" in transcript(window))
+
+    window.set_project(alpha)
+    wait_for(lambda: window.state == "ready" and "look around" not in transcript(window))
+    assert window.settings["project"] == alpha
+    assert window.chat.composer.folder_button.text().startswith("alpha")
+    saved = Settings.load(window.settings.path)["recent_projects"]
+    assert saved[0] == alpha and saved[1].endswith("project"), saved
+    close(window)
+
+
+@test
+def choosing_the_same_folder_keeps_the_chat():
+    window = make_window()
+    send(window, "look around")
+    wait_for(lambda: window.state == "ready" and "a.py" in transcript(window))
+    window.set_project(window.settings["project"])
+    QTest.qWait(200)
+    assert "look around" in transcript(window), "nothing to restart for"
+    close(window)
+
+
+@test
+def any_folder_can_be_chosen_and_the_list_stays_short():
+    window = make_window()
+    many = folders(*[f"f{i}" for i in range(12)])
+    window.settings["recent_projects"] = many
+    assert len(window.recent_folders()) == 8
+
+    (picked,) = folders("picked")
+    original = window_module.QFileDialog.getExistingDirectory
+    window_module.QFileDialog.getExistingDirectory = staticmethod(lambda *a: picked)
+    try:
+        next(a for a in (window._fill_folder_menu() or window.folder_menu.actions()) if a.text().startswith("Choose")).trigger()
+    finally:
+        window_module.QFileDialog.getExistingDirectory = original
+    wait_for(lambda: window.settings["project"] == picked and window.state == "ready")
+    close(window)
+
+
+@test
+def the_folder_can_be_chosen_on_first_run_but_not_mid_task():
+    window = make_window(project=False)
+    QTest.qWait(50)
+    assert window.chat.composer.folder_button.isEnabled()
+    assert window.chat.composer.folder_button.text().startswith("Choose a folder")
+    close(window)
+
+    window = make_window()
+    send(window, "hang around")
+    wait_for(lambda: window.state == "busy")
+    assert not window.chat.composer.folder_button.isEnabled()
+    window.chat.composer.stop_button.click()
+    wait_for(lambda: window.state == "ready")
+    assert window.chat.composer.folder_button.isEnabled()
     close(window)
 
 

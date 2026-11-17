@@ -1,5 +1,6 @@
 import type { ToolDefinition } from "../types.js";
 import { MEMORY_FILENAME } from "../context/memory.js";
+import { describeEnvironment } from "../context/environment.js";
 import type { ProjectDoc } from "../context/projectDocs.js";
 
 export interface PrimerContext {
@@ -91,7 +92,11 @@ You have been given one self-contained piece of a larger job by an orchestrator.
   return "";
 }
 
-export function buildSystemPrimer(toolList: ToolDefinition[], role: AgentRole = "solo"): string {
+export function buildSystemPrimer(
+  toolList: ToolDefinition[],
+  role: AgentRole = "solo",
+  environment: string = describeEnvironment()
+): string {
   const toolDocs = toolList
     .filter((t) => !t.deferred)
     .map((t) => `- ${t.description}`)
@@ -107,6 +112,8 @@ You do not have direct filesystem, shell, or network access — instead you have
 which a local program will execute on your behalf:
 
 ${toolDocs}${onDemand}
+
+${environment}
 
 RULES FOR USING TOOLS:
 - To use a tool, reply with ONLY a single code block (a \`\`\`json fenced block is fine), containing exactly this JSON and nothing else:
