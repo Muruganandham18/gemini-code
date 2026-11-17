@@ -5,8 +5,8 @@ import os
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, QTimer
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import QEvent, QProcess, Qt, QTimer
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 from . import theme
 from .agent import AgentProcess, ApiServerProcess, node_command, process_environment
 from .chat import ChatPage
+from .frame import FrameWidget, TitleBar
 from .pages import ApiPage, LogsPage, McpPage, MemoryPage, PlanPage, SettingsPage, SkillsPage
 from .picker import ModelPopup, picker_label
 from .settings import Settings
@@ -48,7 +49,6 @@ MAX_NUDGE_ACK_CHARS = 200
 
 THINKING_WORDS = {"on": "High", "off": "Low"}
 MAX_RECENT_FOLDERS = 8
-LOGO = Path(__file__).resolve().parent / "assets" / "logo.png"
 
 STATE_LABELS = {
     "offline": ("Not started", theme.MUTED),
@@ -121,13 +121,19 @@ class MainWindow(QMainWindow):
             self.pages.addWidget(page)
         self.nav.currentRowChanged.connect(self._show_page)
 
-        root = QWidget()
-        row = QHBoxLayout(root)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(0)
-        row.addWidget(self._build_sidebar())
-        row.addWidget(self.pages, 1)
-        self.setCentralWidget(root)
+        # Borderless: the window draws its own frame, title bar and edges.
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.frame = FrameWidget()
+        self.title_bar = TitleBar(self)
+        body = QHBoxLayout()
+        body.setContentsMargins(8, 0, 0, 8)
+        body.setSpacing(0)
+        body.addWidget(self._build_sidebar())
+        body.addWidget(self.pages, 1)
+        self.frame.column.addWidget(self.title_bar)
+        self.frame.column.addLayout(body, 1)
+        self.setCentralWidget(self.frame)
         self.nav.setCurrentRow(0)
 
         composer = self.chat.composer
@@ -166,23 +172,11 @@ class MainWindow(QMainWindow):
         side.setObjectName("sidebar")
         side.setFixedWidth(220)
         column = QVBoxLayout(side)
-        column.setContentsMargins(10, 14, 10, 10)
+        column.setContentsMargins(10, 12, 10, 10)
         column.setSpacing(4)
 
-        mark = QLabel()
-        mark.setPixmap(QIcon(str(LOGO)).pixmap(24, 24))
-        mark.setFixedSize(24, 24)
-        brand = QLabel("gemini-code")
-        brand.setObjectName("brand")
-        header = QHBoxLayout()
-        header.setContentsMargins(8, 0, 0, 8)
-        header.setSpacing(8)
-        header.addWidget(mark)
-        header.addWidget(brand, 1)
-        column.addLayout(header)
-
-        self.new_chat_button = QPushButton("+  New chat")
-        self.new_chat_button.setObjectName("ghost")
+        self.new_chat_button = QPushButton("+   New chat")
+        self.new_chat_button.setObjectName("newChat")
         self.new_chat_button.clicked.connect(self.new_chat)
         column.addWidget(self.new_chat_button)
         column.addSpacing(6)
@@ -753,6 +747,14 @@ class MainWindow(QMainWindow):
     def _ask(self, question: str) -> bool:
         answer = QMessageBox.question(self, "gemini-code", question)
         return answer == QMessageBox.StandardButton.Yes
+
+    def changeEvent(self, event) -> None:
+        # Maximized fills the screen, so no rounded corners, shadow or edges.
+        if event.type() == QEvent.Type.WindowStateChange:
+            maximized = self.isMaximized() or self.isFullScreen()
+            self.frame.set_maximized(maximized)
+            self.title_bar.show_state(maximized)
+        super().changeEvent(event)
 
     def closeEvent(self, event) -> None:
         if self.state == "busy" and not self._ask("A task is running. Quit anyway?"):

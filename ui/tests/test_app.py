@@ -17,7 +17,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 UI_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(UI_ROOT))
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QPoint, Qt, QUrl
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
@@ -122,6 +122,93 @@ def a_fence_inside_a_longer_fence_is_code():
     assert split_markdown(body) == [("code", "```\ninner\n```", "md")]
 
 
+print("Links:")
+
+
+@test
+def web_addresses_in_text_become_links_and_the_rest_is_escaped():
+    html = chat.linkify("see https://example.com/a?b=1&c=2. or www.python.org, <b>not bold</b>")
+    assert 'href="https://example.com/a?b=1&amp;c=2"' in html, html
+    assert ">https://example.com/a?b=1&amp;c=2</a>. or" in html, "the full stop isn't part of the link"
+    assert 'href="https://www.python.org"' in html and "www.python.org</a>," in html
+    assert "&lt;b&gt;not bold&lt;/b&gt;" in html, "text from a message is never markup"
+
+
+@test
+def a_bracket_around_a_link_stays_outside_it():
+    assert 'href="https://a.dev/x"' in chat.linkify("(see https://a.dev/x)")
+    assert 'href="https://en.wikipedia.org/wiki/Python_(language)"' in chat.linkify(
+        "https://en.wikipedia.org/wiki/Python_(language)"
+    ), "a bracket that belongs to the URL stays in it"
+
+
+@test
+def bare_urls_in_replies_become_links_but_not_inside_code():
+    md = chat.autolink_markdown("Go to https://a.dev/docs. See [docs](https://b.dev) and `curl https://c.dev`")
+    assert "<https://a.dev/docs>." in md
+    assert "[docs](https://b.dev)" in md, "a link already written stays as it is"
+    assert "`curl https://c.dev`" in md, "a URL in code stays literal"
+
+
+@test
+def clicking_a_link_opens_it_and_nothing_else():
+    opened = []
+    real = chat.QDesktopServices.openUrl
+    chat.QDesktopServices.openUrl = staticmethod(lambda url: opened.append(url.toString()))
+    try:
+        label = chat.wrapped_label("read https://example.com/page now", "note", links=True)
+        assert label.textFormat() == Qt.TextFormat.RichText
+        label.linkActivated.emit("https://example.com/page")
+        label.linkActivated.emit("file:///C:/Windows/System32/calc.exe")
+        assert opened == ["https://example.com/page"], opened
+        plain = chat.wrapped_label("no links <here>", "note", links=True)
+        assert plain.textFormat() == Qt.TextFormat.PlainText and plain.text() == "no links <here>"
+    finally:
+        chat.QDesktopServices.openUrl = real
+
+
+@test
+def a_link_in_your_own_message_is_clickable():
+    window = make_window()
+    send(window, "check https://example.com/page please")
+    wait_for(lambda: window.chat.view.widget().findChildren(chat.UserMessage))
+    label = window.chat.view.widget().findChildren(chat.UserMessage)[0].label
+    assert 'href="https://example.com/page"' in label.text()
+    close(window)
+
+
+print("Window frame:")
+
+
+@test
+def the_window_is_borderless_and_draws_its_own_title_bar():
+    window = make_window()
+    assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
+    assert window.title_bar.isVisible()
+    window.title_bar.toggle_maximized()
+    wait_for(lambda: window.isMaximized())
+    assert window.frame.maximized and window.frame.column.contentsMargins().left() == 0
+    window.title_bar.toggle_maximized()
+    wait_for(lambda: not window.isMaximized())
+    assert not window.frame.maximized and window.frame.column.contentsMargins().left() > 0
+    close(window)
+
+
+@test
+def the_edges_resize_and_the_middle_does_not():
+    window = make_window()
+    frame = window.frame
+    frame.resize(800, 600)
+    edges = frame._edges
+    assert edges(QPoint(1, 300)) == Qt.Edge.LeftEdge
+    assert edges(QPoint(799, 599)) == Qt.Edge.RightEdge | Qt.Edge.BottomEdge
+    assert edges(QPoint(400, 300)) == Qt.Edge(0)
+    frame.set_maximized(True)
+    assert edges(QPoint(1, 1)) == Qt.Edge(0), "nothing to resize when maximized"
+    frame.set_maximized(False)
+    close(window)
+
+
 print("Settings:")
 
 
@@ -148,6 +235,13 @@ def survives_a_round_trip_and_ignores_unknown_keys():
     path.write_text(json.dumps({"nonsense": 1, "model": "pro"}), encoding="utf-8")
     loaded = Settings.load(path)
     assert "nonsense" not in loaded.values and loaded["model"] == "pro"
+
+
+@test
+def settings_saved_with_a_bom_still_load():
+    path = scratch / "bom.json"
+    path.write_text(json.dumps({"model": "pro"}), encoding="utf-8-sig")
+    assert Settings.load(path)["model"] == "pro"
 
 
 @test

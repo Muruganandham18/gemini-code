@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QGuiApplication, QTextOption
+from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QTextFrameFormat, QTextOption, QTextTable
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -74,10 +74,58 @@ def split_markdown(text: str) -> list[tuple[str, str, str]]:
     return parts
 
 
-def open_link(url: QUrl) -> None:
+def open_link(url: QUrl | str) -> None:
     # A reply is untrusted text, and a file: link to a program would run it.
+    url = QUrl(url) if isinstance(url, str) else url
     if url.scheme().lower() in OPENABLE_LINKS:
         QDesktopServices.openUrl(url)
+
+
+URL = re.compile(r"(?:https?://|www\.)[^\s<>\"'`]+", re.IGNORECASE)
+CLOSERS = {")": "(", "]": "[", "}": "{"}
+
+
+def _trim_url(url: str) -> str:
+    """Drops what follows a URL in prose rather than belonging to it: a full
+    stop, a comma, or a bracket that closes something opened before the URL."""
+    while url:
+        last = url[-1]
+        if last in ".,;:!?'\"":
+            url = url[:-1]
+        elif last in CLOSERS and url.count(last) > url.count(CLOSERS[last]):
+            url = url[:-1]
+        else:
+            break
+    return url
+
+
+def linkify(text: str) -> str:
+    """Plain text as rich text, with every web address a link and the rest escaped."""
+    out: list[str] = []
+    last = 0
+    for match in URL.finditer(text):
+        url = _trim_url(match.group())
+        if not url:
+            continue
+        href = url if url.lower().startswith("http") else f"https://{url}"
+        out.append(escape(text[last:match.start()]))
+        out.append(f'<a href="{escape(href, quote=True)}" style="color:{theme.LINK};">{escape(url)}</a>')
+        last = match.start() + len(url)
+    out.append(escape(text[last:]))
+    # pre-wrap keeps the line breaks and spacing the text came with.
+    return f'<span style="white-space: pre-wrap;">{"".join(out)}</span>'
+
+
+BARE_URL = re.compile(r"(?<![(<\[\w/=\"'])(https?://[^\s<>()\[\]`]*[^\s<>()\[\]`.,;:!?'\"])", re.IGNORECASE)
+
+
+def autolink_markdown(text: str) -> str:
+    """Wraps bare URLs in <> so markdown makes them links. Not inside `code`,
+    where a URL is meant to be read as it is, and not ones already in a link."""
+    parts = re.split(r"(`+[^`]*`+)", text)
+    for i in range(0, len(parts), 2):
+        parts[i] = BARE_URL.sub(r"<\1>", parts[i])
+    return "".join(parts)
 
 
 class MarkdownView(QTextBrowser):
@@ -92,9 +140,24 @@ class MarkdownView(QTextBrowser):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         self.document().setDocumentMargin(0)
-        self.setMarkdown(text)
+        self.setMarkdown(autolink_markdown(text))
+        self._soften_tables()
         self.document().contentsChanged.connect(self._fit)
         self._fit()
+
+    def _soften_tables(self) -> None:
+        """Markdown tables come with thick white borders, which glare on glass.
+        A stylesheet can't reach them through setMarkdown, so set them directly."""
+        for frame in self.document().rootFrame().childFrames():
+            if isinstance(frame, QTextTable):
+                table_format = frame.format()
+                table_format.setBorder(1)
+                table_format.setBorderStyle(QTextFrameFormat.BorderStyle.BorderStyle_Solid)
+                table_format.setBorderBrush(QColor(255, 255, 255, 40))
+                table_format.setBorderCollapse(True)
+                table_format.setCellPadding(6)
+                table_format.setCellSpacing(0)
+                frame.setFormat(table_format)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -168,12 +231,10 @@ class UserMessage(QWidget):
         bubble.setObjectName("userBubble")
         bubble.setMaximumWidth(640)
         inner = QVBoxLayout(bubble)
-        inner.setContentsMargins(14, 8, 14, 8)
-        label = QLabel(text)
-        label.setTextFormat(Qt.TextFormat.PlainText)
-        label.setWordWrap(True)
-        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        inner.setContentsMargins(16, 10, 16, 10)
+        label = wrapped_label(text, "message", links=True)
         inner.addWidget(label)
+        self.label = label
         for image in images:
             chip = QLabel(f"Attached: {Path(image).name}")
             chip.setObjectName("help")
@@ -239,7 +300,7 @@ class ToolRow(QWidget):
         self.chevron.setText("⌄" if not self.details.isHidden() else "›")
 
     def add_detail(self, text: str, failed: bool) -> None:
-        self._details.addWidget(wrapped_label(text, "detailBad" if failed else "detail"))
+        self._details.addWidget(wrapped_label(text, "detailBad" if failed else "detail", links=True))
         self._set_dot(theme.BAD if failed else theme.GOOD)
         self.chevron.show()
         if failed and self.details.isHidden():
@@ -365,12 +426,20 @@ def centered(widget: QWidget) -> QHBoxLayout:
     return row
 
 
-def wrapped_label(text: str, name: str) -> QLabel:
-    label = QLabel(text)
+def wrapped_label(text: str, name: str, links: bool = False) -> QLabel:
+    """Selectable text. With `links`, web addresses in it can be clicked."""
+    label = QLabel()
     label.setObjectName(name)
-    label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(True)
-    label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    if links and URL.search(text):
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setText(linkify(text))
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        label.linkActivated.connect(open_link)
+    else:
+        label.setTextFormat(Qt.TextFormat.PlainText)
+        label.setText(text)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     return label
 
 
@@ -441,7 +510,7 @@ class ChatView(QScrollArea):
     def add_note(self, text: str, level: str = "") -> None:
         name = {"warn": "noteWarn", "bad": "noteBad", "good": "noteGood"}.get(level, "note")
         self._last_tool = None
-        self._add(wrapped_label(text, name))
+        self._add(wrapped_label(text, name, links=True))
 
     def add_confirm(self, confirm_id: int, label: str, detail: str, answer: Callable[[bool], None]) -> ConfirmCard:
         self._last_tool = None
